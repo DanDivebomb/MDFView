@@ -37,6 +37,7 @@ from ..dialogs.error_dialog import ErrorDialog
 from ..dialogs.gps_dialog import GPSDialog
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.window_selection_dialog import WindowSelectionDialog
+from ..mdfview_paths import remember_folder, start_folder
 from ..serde import (
     ExtendedJsonDecoder,
     ExtendedJsonEncoder,
@@ -1091,7 +1092,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 dir = str(self.loaded_display_file[0])
             else:
                 settings = QtCore.QSettings()
-                dir = self.default_folder or settings.value("paths/previous/offline_display_path", "")
+                dir = start_folder("config", settings.value("paths/previous/offline_display_path", ""))
 
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
@@ -1099,6 +1100,8 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 dir,
                 "Display files (*.dspf)",
             )
+
+            remember_folder("config", file_name)
 
         if file_name:
             file_name = Path(file_name).with_suffix(".dspf")
@@ -1116,7 +1119,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
                 "Select channel list file",
-                self.default_folder,
+                start_folder("config"),
                 "Config file (*.cfg);;TXT files (*.txt);;Display files (*.dsp *.dspf);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
                 "All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
             )
@@ -1129,6 +1132,8 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 ".txt",
             ):
                 return
+
+            remember_folder("config", file_name)
 
         if not isinstance(file_name, dict):
             file_name = Path(file_name)
@@ -1507,10 +1512,12 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Select output filter list file",
-            self.default_folder,
+            start_folder("filter"),
             "CANape Lab file (*.lab)",
             "CANape Lab file (*.lab)",
         )
+
+        remember_folder("filter", file_name)
 
         if file_name:
             file_name = Path(file_name)
@@ -1559,7 +1566,7 @@ MultiRasterSeparator;&
             file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
                 "Select channel list file",
-                self.default_folder,
+                start_folder("filter"),
                 "Config file (*.cfg);;Display files (*.dsp *.dspf);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
                 "All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
             )
@@ -1572,6 +1579,8 @@ MultiRasterSeparator;&
                 ".txt",
             ):
                 return
+
+            remember_folder("filter", file_name)
 
         if not isinstance(file_name, dict):
             file_name = Path(file_name)
