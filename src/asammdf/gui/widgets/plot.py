@@ -2214,8 +2214,8 @@ class Plot(QtWidgets.QWidget):
                 if individual_axis:
                     item.setCheckState(item.IndividualAxisColumn, QtCore.Qt.CheckState.Checked)
 
-                    _, idx = self.plot.signal_by_uuid(sig_uuid)
-                    axis = self.plot.get_axis(idx)
+                    strip, _sig, idx = self.strip_signal_by_uuid(sig_uuid)
+                    axis = strip.get_axis(idx)
                     if isinstance(axis, FormatedAxis):
                         axis.setWidth(description["individual_axis_width"])
 
@@ -2401,7 +2401,7 @@ class Plot(QtWidgets.QWidget):
 
         channel = {"type": "channel"}
 
-        sig, idx = self.plot.signal_by_uuid(widget.uuid)
+        strip, sig, idx = self.strip_signal_by_uuid(widget.uuid)
 
         if sig.flags & Signal.Flags.user_defined_name:
             channel["user_defined_name"] = sig.name
@@ -2415,7 +2415,7 @@ class Plot(QtWidgets.QWidget):
 
         if item.checkState(item.IndividualAxisColumn) == QtCore.Qt.CheckState.Checked:
             channel["individual_axis"] = True
-            channel["individual_axis_width"] = self.plot.get_axis(idx).width()
+            channel["individual_axis_width"] = strip.get_axis(idx).width()
         else:
             channel["individual_axis"] = False
 
@@ -2702,7 +2702,7 @@ class Plot(QtWidgets.QWidget):
         self.plot.set_current_uuid(self.info_uuid, True)
 
     def compute_fft(self, uuid):
-        signal, index = self.plot.signal_by_uuid(uuid)
+        _strip, signal, _index = self.strip_signal_by_uuid(uuid)
         try:
             window = FFTWindow(PlotSignal(signal), parent=self)
             window.show()
@@ -2714,7 +2714,7 @@ class Plot(QtWidgets.QWidget):
 
         if uuid:
             palette = self.selected_channel_value.palette()
-            sig, idx = self.plot.signal_by_uuid(uuid)
+            _strip, sig, _idx = self.strip_signal_by_uuid(uuid)
             brush = QtGui.QBrush(sig.color)
             brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
 
@@ -2986,7 +2986,7 @@ class Plot(QtWidgets.QWidget):
                     continue
 
                 elif item_type == item.Channel:
-                    signal, idx = self.plot.signal_by_uuid(item.uuid)
+                    strip, signal, idx = self.strip_signal_by_uuid(item.uuid)
 
                     if signal.plot_samples.dtype.kind in "uif":
                         signal.format = fmt
@@ -2998,12 +2998,12 @@ class Plot(QtWidgets.QWidget):
                         widget.set_fmt(fmt)
                         widget.set_value(update=True)
 
-                        if self.plot.current_uuid == signal.uuid:
-                            self.plot.y_axis.format = fmt
-                            self.plot.y_axis.picture = None
-                            self.plot.y_axis.update()
+                        if strip.current_uuid == signal.uuid:
+                            strip.y_axis.format = fmt
+                            strip.y_axis.picture = None
+                            strip.y_axis.update()
 
-                        axis = self.plot.get_axis(idx)
+                        axis = strip.get_axis(idx)
                         if isinstance(axis, FormatedAxis):
                             axis.format = fmt
                             axis.picture = None
@@ -3032,13 +3032,13 @@ class Plot(QtWidgets.QWidget):
         ):
             selected_items = self.channel_selection.selectedItems()
             if not selected_items:
-                signals = [(sig, i) for i, sig in enumerate(self.plot.signals)]
-                uuids = [sig.uuid for sig in self.plot.signals]
+                signals = [(strip, sig, i) for strip in self.strips for i, sig in enumerate(strip.signals)]
+                uuids = [sig.uuid for strip in self.strips for sig in strip.signals]
 
             else:
                 uuids = [item.uuid for item in selected_items if item.type() == ChannelsTreeItem.Channel]
 
-                signals = [self.plot.signal_by_uuid(uuid) for uuid in uuids]
+                signals = [self.strip_signal_by_uuid(uuid) for uuid in uuids]
 
             if signals:
                 if key == QtCore.Qt.Key.Key_R:
@@ -3049,7 +3049,7 @@ class Plot(QtWidgets.QWidget):
                     mode = "phys"
                     style = QtCore.Qt.PenStyle.SolidLine
 
-                for signal, idx in signals:
+                for strip, signal, idx in signals:
                     if signal.mode != mode:
                         signal.pen = fn.mkPen(color=signal.color, style=style)
 
@@ -3085,15 +3085,15 @@ class Plot(QtWidgets.QWidget):
                         item = self.item_by_uuid(signal.uuid)
                         item._value = None
 
-                        if self.plot.current_uuid == signal.uuid:
-                            self.plot.y_axis.mode = mode
-                            self.plot.y_axis.picture = None
-                            self.plot.y_axis.update()
-                            self.plot.viewbox.setYRange(buttom, top, padding=0, update=True)
+                        if strip.current_uuid == signal.uuid:
+                            strip.y_axis.mode = mode
+                            strip.y_axis.picture = None
+                            strip.y_axis.update()
+                            strip.viewbox.setYRange(buttom, top, padding=0, update=True)
 
-                        self.plot.get_axis(idx).mode = mode
-                        self.plot.get_axis(idx).picture = None
-                        self.plot.get_axis(idx).update()
+                        strip.get_axis(idx).mode = mode
+                        strip.get_axis(idx).picture = None
+                        strip.get_axis(idx).update()
 
             for uuid in uuids:
                 item = self.item_by_uuid(uuid)
@@ -3159,7 +3159,7 @@ class Plot(QtWidgets.QWidget):
 
                 signals = {}
                 for i, uuid in enumerate(uuids):
-                    sig, idx = self.plot.signal_by_uuid(uuid)
+                    _strip, sig, _idx = self.strip_signal_by_uuid(uuid)
                     if i == 0:
                         y_range = sig.y_range
                     signals[sig.name] = sig
@@ -3299,12 +3299,15 @@ class Plot(QtWidgets.QWidget):
 
         for item in self._visible_items.values():
             if item.type() == item.Channel:
-                signal, i = self.plot.signal_by_uuid(item.uuid)
+                try:
+                    strip, signal, _i = self.strip_signal_by_uuid(item.uuid)
+                except KeyError:
+                    continue
 
-                index = self.plot.get_timestamp_index(start, signal.timestamps)
+                index = strip.get_timestamp_index(start, signal.timestamps)
                 start_raw_v, raw_kind, start_v, kind, fmt = signal.value_at_index(index)
 
-                index = self.plot.get_timestamp_index(stop, signal.timestamps)
+                index = strip.get_timestamp_index(stop, signal.timestamps)
                 stop_raw_v, raw_kind, stop_v, kind, fmt = signal.value_at_index(index)
 
                 if self.region_values_display_mode == "delta":
