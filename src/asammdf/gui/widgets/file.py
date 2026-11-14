@@ -645,8 +645,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     if search_name.pattern and not search_name.pattern.search(ch.name):
                         continue
 
-                    if group.channel_group.acq_source:
-                        bus = group.channel_group.acq_source.path or "None"
+                    acq_source = getattr(group.channel_group, "acq_source", None)
+                    if acq_source:
+                        bus = acq_source.path or "None"
                     else:
                         bus = "None"
 
