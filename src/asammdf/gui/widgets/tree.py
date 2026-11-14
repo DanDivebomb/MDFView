@@ -449,6 +449,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     CommonAxisColumn = 4
     IndividualAxisColumn = 5
     OriginColumn = 6
+    LockColumn = 7
 
     def __init__(
         self,
@@ -472,14 +473,16 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         self.can_delete_items = True
 
         self.setHeaderHidden(False)
-        self.setColumnCount(7)
-        self.setHeaderLabels(["Name", "Raw", "Value", "Unit", "\u290a", "\u21a8", "Origin"])
+        self.setColumnCount(8)
+        self.setHeaderLabels(["Name", "Raw", "Value", "Unit", "\u290a", "\u21a8", "Origin", "\U0001f512"])
         self.setDragEnabled(True)
         self.setExpandsOnDoubleClick(False)
 
         self.setMinimumWidth(5)
         header = self.header()
         header.setMinimumSectionSize(MINIMUM_COLUMN_WIDTH)
+        header.resizeSection(self.LockColumn, MINIMUM_COLUMN_WIDTH)
+        header.setSectionResizeMode(self.LockColumn, QtWidgets.QHeaderView.ResizeMode.Fixed)
         header.resizeSection(self.CommonAxisColumn, MINIMUM_COLUMN_WIDTH)
         header.resizeSection(self.IndividualAxisColumn, MINIMUM_COLUMN_WIDTH)
         header.setSectionResizeMode(self.CommonAxisColumn, QtWidgets.QHeaderView.ResizeMode.Fixed)
@@ -512,7 +515,72 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         self.disabled_keyboard_events = set()
 
+        # Spaltenbreiten merken: asammdf setzt Name und Unit sonst bei
+        # jedem Hinzufuegen wieder auf die Inhaltsbreite zurueck.
+        self._restoring_header_sizes = False
+        self.user_header_sizes = False
+        self._header_size_timer = QtCore.QTimer()
+        self._header_size_timer.setSingleShot(True)
+        self._header_size_timer.setInterval(400)
+        self._header_size_timer.timeout.connect(self.store_header_sizes)
+        self.apply_stored_header_sizes()
+
         self.set_style()
+
+        # erst ganz zum Schluss verbinden, damit der Aufbau der Spalten
+        # nicht als Benutzereingriff gewertet wird
+        header.sectionResized.connect(self._header_section_resized)
+
+    def _header_section_resized(self, *args):
+        if self._restoring_header_sizes:
+            return
+
+        # Qt meldet jede Aenderung einer Spaltenbreite, auch solche vom
+        # Aufbau, vom Ein- und Ausblenden oder vom Abraeumen des Fensters.
+        # Als Benutzereingriff zaehlt nur, was mit gedrueckter Maustaste
+        # passiert - sonst landen Zufallswerte in den Einstellungen.
+        if not QtWidgets.QApplication.mouseButtons():
+            return
+
+        self.user_header_sizes = True
+        self._header_size_timer.start()
+
+    def resize_columns_to_contents(self, *columns):
+        """Automatisch anpassen, ohne es als Benutzereingriff zu werten."""
+        self._restoring_header_sizes = True
+        try:
+            for col in columns:
+                self.resizeColumnToContents(col)
+        finally:
+            self._restoring_header_sizes = False
+
+    def store_header_sizes(self):
+        """Breiten merken, damit sie den Programmstart ueberleben.
+
+        Als JSON-Text, weil eine Zuordnung je nach Plattform nicht
+        zuverlaessig aus den Qt-Einstellungen zurueckkommt.
+        """
+        QtCore.QSettings().setValue("plot/channel_list_header_sizes", json.dumps(self.header_sizes()))
+
+    def apply_stored_header_sizes(self):
+        """Gemerkte Breiten uebernehmen, falls welche hinterlegt sind."""
+        raw = QtCore.QSettings().value("plot/channel_list_header_sizes", "", str)
+
+        if not raw:
+            return False
+
+        try:
+            sizes = json.loads(raw)
+        except ValueError:
+            return False
+
+        if not isinstance(sizes, dict) or not sizes:
+            return False
+
+        self.set_header_sizes(sizes)
+        self.user_header_sizes = True
+
+        return True
 
     def autoscroll(self):
         step = max(
@@ -575,13 +643,22 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             self.scrollToItem(item)
 
         else:
+            item = self.itemAt(e.position().toPoint())
+
+            if item and item.type() == item.Info:
+                item = item.parent()
+
+            # Zug aus der Kanalliste eines anderen Strips: verschieben,
+            # nicht kopieren.
+            if self._moved_from_other_strip(e, item):
+                e.accept()
+                self.refresh()
+                self.update_channel_groups_count()
+                return
+
             data = e.mimeData()
             if data.hasFormat("application/octet-stream-asammdf"):
                 names = extract_mime_names(data)
-                item = self.itemAt(e.position().toPoint())
-
-                if item and item.type() == item.Info:
-                    item = item.parent()
                 self.drop_target = item
 
                 self.add_channels_request.emit(names)
@@ -591,6 +668,20 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         self.refresh()
         self.update_channel_groups_count()
+
+    def _moved_from_other_strip(self, e, destination=None):
+        """True, wenn der Zug aus einem anderen Strip kam und erledigt ist."""
+        owner = getattr(self, "owner_plot", None)
+        window = self.plot
+
+        if owner is None or window is None or not hasattr(window, "move_signals_between_strips"):
+            return False
+
+        source = e.source()
+        if source is self or source not in window.channel_lists():
+            return False
+
+        return window.move_signals_between_strips(source, owner, destination=destination)
 
     def header_columns_visibility(self):
         visibility = {}
@@ -602,6 +693,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             "CommonAxisColumn",
             "IndividualAxisColumn",
             "OriginColumn",
+            "LockColumn",
         ):
             col = getattr(self, name)
             visibility[name] = not self.isColumnHidden(col)
@@ -617,6 +709,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             "CommonAxisColumn",
             "IndividualAxisColumn",
             "OriginColumn",
+            "LockColumn",
         ):
             col = getattr(self, name)
             sizes[name] = self.columnWidth(col)
@@ -1019,6 +1112,10 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         action = QtGui.QAction("Unit Column", submenu)
         action.setCheckable(True)
         action.setChecked(not self.isColumnHidden(self.UnitColumn))
+        submenu.addAction(action)
+        action = QtGui.QAction("Lock Column", submenu)
+        action.setCheckable(True)
+        action.setChecked(not self.isColumnHidden(self.LockColumn))
         submenu.addAction(action)
         action = QtGui.QAction("Common Axis Column", submenu)
         action.setCheckable(True)
@@ -1779,6 +1876,8 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             self.setColumnHidden(self.RawColumn, not self.isColumnHidden(self.RawColumn))
         elif action_text == "Unit Column":
             self.setColumnHidden(self.UnitColumn, not self.isColumnHidden(self.UnitColumn))
+        elif action_text == "Lock Column":
+            self.setColumnHidden(self.LockColumn, not self.isColumnHidden(self.LockColumn))
         elif action_text == "Common Axis Column":
             self.setColumnHidden(self.CommonAxisColumn, not self.isColumnHidden(self.CommonAxisColumn))
         elif action_text == "Individual Axis Column":
@@ -1834,7 +1933,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             self.update_visibility_status()
 
     def setColumnWidth(self, column, width):
-        if column not in (self.CommonAxisColumn, self.IndividualAxisColumn):
+        if column not in (self.LockColumn, self.CommonAxisColumn, self.IndividualAxisColumn):
             width = max(width, MINIMUM_COLUMN_WIDTH)
             super().setColumnWidth(column, width)
 
@@ -1875,14 +1974,25 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             self.setColumnHidden(col, not is_visible)
 
     def set_header_sizes(self, sizes):
-        for name, size in sizes.items():
-            col = getattr(self, name, -1)
-            if col == -1:
-                continue
-            elif name in ("NameColumn", "ValueColumn"):
-                size = max(size, 50)
+        # Aus den Qt-Einstellungen kommen die Breiten als Text zurueck.
+        self._restoring_header_sizes = True
+        try:
+            for name, size in sizes.items():
+                col = getattr(self, name, -1)
+                if col == -1:
+                    continue
 
-            self.setColumnWidth(col, size)
+                try:
+                    size = int(size)
+                except (TypeError, ValueError):
+                    continue
+
+                if name in ("NameColumn", "ValueColumn"):
+                    size = max(size, 50)
+
+                self.setColumnWidth(col, size)
+        finally:
+            self._restoring_header_sizes = False
 
     def set_style(self):
         dark = (
@@ -1975,6 +2085,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
     CommonAxisColumn = 4
     IndividualAxisColumn = 5
     OriginColumn = 6
+    LockColumn = 7
 
     def __init__(
         self,
@@ -2083,6 +2194,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setToolTip(self.ValueColumn, "")
             self.setToolTip(self.RawColumn, "")
             self.setToolTip(self.UnitColumn, "unit")
+            self.setToolTip(self.LockColumn, "Y-Bereich dieses Signals festhalten")
             self.setToolTip(self.CommonAxisColumn, "common axis")
             self.setToolTip(self.IndividualAxisColumn, "individual axis")
 
@@ -2099,6 +2211,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setForeground(self.NameColumn, signal.color)
             self.setForeground(self.RawColumn, signal.color)
             self.setForeground(self.ValueColumn, signal.color)
+            self.setForeground(self.LockColumn, signal.color)
             self.setForeground(self.CommonAxisColumn, signal.color)
             self.setForeground(self.IndividualAxisColumn, signal.color)
             self.setForeground(self.UnitColumn, signal.color)
@@ -2118,6 +2231,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             else:
                 self.setCheckState(self.NameColumn, check)
 
+            self.setCheckState(self.LockColumn, QtCore.Qt.CheckState.Unchecked)
             self.setCheckState(self.CommonAxisColumn, QtCore.Qt.CheckState.Unchecked)
             self.setCheckState(self.IndividualAxisColumn, QtCore.Qt.CheckState.Unchecked)
 
@@ -2670,6 +2784,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                     self.setBackground(self.RawColumn, brush)
                     self.setBackground(self.ValueColumn, brush)
                     self.setBackground(self.UnitColumn, brush)
+                    self.setBackground(self.LockColumn, brush)
                     self.setBackground(self.CommonAxisColumn, brush)
                     self.setBackground(self.IndividualAxisColumn, brush)
                     self.setBackground(self.OriginColumn, brush)
@@ -2681,6 +2796,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                     self.setBackground(self.RawColumn, brush)
                     self.setBackground(self.ValueColumn, brush)
                     self.setBackground(self.UnitColumn, brush)
+                    self.setBackground(self.LockColumn, brush)
                     self.setBackground(self.CommonAxisColumn, brush)
                     self.setBackground(self.IndividualAxisColumn, brush)
                     self.setBackground(self.OriginColumn, brush)
@@ -2693,6 +2809,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                     self.setForeground(self.UnitColumn, brush)
                     self.setForeground(self.RawColumn, brush)
                     self.setForeground(self.ValueColumn, brush)
+                    self.setForeground(self.LockColumn, brush)
                     self.setForeground(self.CommonAxisColumn, brush)
                     self.setForeground(self.IndividualAxisColumn, brush)
                     self.setForeground(self.OriginColumn, brush)
@@ -2704,6 +2821,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                     self.setForeground(self.RawColumn, brush)
                     self.setForeground(self.ValueColumn, brush)
                     self.setForeground(self.UnitColumn, brush)
+                    self.setForeground(self.LockColumn, brush)
                     self.setForeground(self.CommonAxisColumn, brush)
                     self.setForeground(self.IndividualAxisColumn, brush)
                     self.setForeground(self.OriginColumn, brush)

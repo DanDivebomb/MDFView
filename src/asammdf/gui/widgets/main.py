@@ -1,5 +1,6 @@
 from functools import partial
 import gc
+import json
 import os
 from pathlib import Path
 import platform
@@ -26,6 +27,7 @@ from .batch import BatchWidget
 from .file import FileWidget
 from .mdi_area import get_functions, MdiAreaWidget, WithMDIArea
 from .plot import Plot
+from ..mdfview_paths import remember_folder, start_folder
 from ..mdfview_theme import DARK_INDICATOR_STYLE
 
 
@@ -1789,10 +1791,68 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 widget.keyPressEvent(event)
 
     def open_configuration(self, event=None):
-        if self.stackedWidget.currentIndex() == 0:
-            widget = self.files.currentWidget()
-            if widget:
-                widget.load_channel_list()
+        if self.stackedWidget.currentIndex() != 0:
+            return
+
+        widget = self.files.currentWidget()
+        if widget:
+            widget.load_channel_list()
+            return
+
+        # Noch keine Messdatei offen: die Konfiguration selbst sagt, zu
+        # welcher Datei sie gehoert - die wird zuerst geladen.
+        file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select channel list file",
+            start_folder("config"),
+            "Display files (*.dsp *.dspf);;Config file (*.cfg);;All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
+            "Display files (*.dsp *.dspf)",
+        )
+
+        if not file_name:
+            return
+
+        remember_folder("config", file_name)
+
+        measurement = self.measurement_file_of_configuration(file_name)
+
+        if measurement is None:
+            MessageBox.information(
+                self,
+                "No measurement file in the configuration",
+                "This configuration does not name a measurement file.\n\n"
+                "It was probably saved by an older version. Open the measurement "
+                "file first, then load the configuration.",
+            )
+            return
+
+        if not measurement.exists():
+            MessageBox.warning(
+                self,
+                "Measurement file not found",
+                f"The configuration refers to\n\n{measurement}\n\n"
+                "but that file does not exist any more. Open the measurement "
+                "file yourself, then load the configuration.",
+            )
+            return
+
+        self._open_file(measurement)
+
+        widget = self.files.currentWidget()
+        if widget is not None:
+            widget.load_channel_list(file_name=file_name)
+
+    def measurement_file_of_configuration(self, file_name):
+        """Pfad der Messdatei aus einer Konfiguration lesen, sonst None."""
+        try:
+            with open(file_name, encoding="utf-8") as infile:
+                info = json.load(infile)
+        except (OSError, ValueError):
+            return None
+
+        measurement = info.get("measurement_file", "")
+
+        return Path(measurement) if measurement else None
 
     def save_configuration(self, event=None):
         if self.stackedWidget.currentIndex() == 0:

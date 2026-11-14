@@ -154,6 +154,11 @@ def deepcopy_cfg_item(item):
             if key in item:
                 new_item[key] = deepcopy(item[key])
 
+    # eigene Felder (Stripnummer, Y-Sperre) muessen die Kopie ueberleben
+    for key in ("strip", "y_locked"):
+        if key in item:
+            new_item[key] = item[key]
+
     return new_item
 
 
@@ -4215,7 +4220,14 @@ class WithMDIArea:
         plot.show_overlapping_alias.connect(self._show_overlapping_alias)
         plot.show_properties.connect(self._show_info)
 
+        # Die Stripaufteilung steckt in den Kanalbeschreibungen; die
+        # Anzahl braucht Plot zusaetzlich, falls der letzte Strip leer ist.
+        plot._pending_strip_count = window_info["configuration"].get("strip_count", 0)
+
         plot.add_new_channels(signals, mime_data)
+
+        if "strip_sizes" in window_info["configuration"]:
+            plot.set_strip_sizes(window_info["configuration"]["strip_sizes"])
 
         # plot.show()
 
@@ -4259,7 +4271,11 @@ class WithMDIArea:
             width, sizes = window_info["configuration"]["channels_header_sizes"]
             current_width = sum(plot.splitter.sizes())
             plot.splitter.setSizes([width, max(current_width - width, 50)])
-            plot.channel_selection.set_header_sizes(sizes)
+            # Von Hand eingestellte Breiten schlagen die Konfiguration -
+            # sonst holt jede alte .dspf die alten Breiten zurueck.
+            for tree in plot.channel_lists():
+                if not tree.user_header_sizes:
+                    tree.set_header_sizes(sizes)
 
         elif "channels_header" in window_info["configuration"]:
             width, sizes = window_info["configuration"]["channels_header"]

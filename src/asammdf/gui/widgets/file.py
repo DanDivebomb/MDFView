@@ -30,6 +30,7 @@ from ...blocks.v4_constants import (
     FLAG_CG_BUS_EVENT,
 )
 from .. import serde
+from ..mdfview_paths import remember_folder, start_folder
 from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.channel_group_info import ChannelGroupInfoDialog
 from ..dialogs.channel_info import ChannelInfoDialog
@@ -37,7 +38,6 @@ from ..dialogs.error_dialog import ErrorDialog
 from ..dialogs.gps_dialog import GPSDialog
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.window_selection_dialog import WindowSelectionDialog
-from ..mdfview_paths import remember_folder, start_folder
 from ..serde import (
     ExtendedJsonDecoder,
     ExtendedJsonEncoder,
@@ -1084,6 +1084,12 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         config["functions"] = self.functions
         config["global_variables"] = "\n".join([line for line in self.global_variables.splitlines() if line])
 
+        # Merken, zu welcher Messdatei diese Konfiguration gehoert. Beim
+        # Oeffnen der Konfiguration aus dem leeren Programm heraus wird
+        # die Datei dann gleich mitgeladen.
+        measurement_file = getattr(self.mdf, "original_name", None) or self.file_name
+        config["measurement_file"] = str(measurement_file) if measurement_file else ""
+
         return config
 
     def save_channel_list(self, event=None, file_name=None):
@@ -1092,18 +1098,17 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 dir = str(self.loaded_display_file[0])
             else:
                 settings = QtCore.QSettings()
-                dir = start_folder("config", settings.value("paths/previous/offline_display_path", ""))
+                dir = self.default_folder or settings.value("paths/previous/offline_display_path", "")
 
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Select output display file",
-                dir,
+                start_folder("config", dir),
                 "Display files (*.dspf)",
             )
 
-            remember_folder("config", file_name)
-
         if file_name:
+            remember_folder("config", file_name)
             file_name = Path(file_name).with_suffix(".dspf")
             file_name.write_text(json.dumps(self.to_config(), indent=2, cls=ExtendedJsonEncoder), encoding="utf-8")
 
@@ -1119,10 +1124,12 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
                 "Select channel list file",
-                start_folder("config"),
+                start_folder("config", self.default_folder),
                 "Config file (*.cfg);;TXT files (*.txt);;Display files (*.dsp *.dspf);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
                 "All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
             )
+
+            remember_folder("config", file_name)
 
             if not file_name or Path(file_name).suffix.lower() not in (
                 ".cfg",
@@ -1132,8 +1139,6 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 ".txt",
             ):
                 return
-
-            remember_folder("config", file_name)
 
         if not isinstance(file_name, dict):
             file_name = Path(file_name)
@@ -1512,14 +1517,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Select output filter list file",
-            start_folder("filter"),
+            start_folder("filter", self.default_folder),
             "CANape Lab file (*.lab)",
             "CANape Lab file (*.lab)",
         )
 
-        remember_folder("filter", file_name)
-
         if file_name:
+            remember_folder("filter", file_name)
             file_name = Path(file_name)
 
             iterator = QtWidgets.QTreeWidgetItemIterator(self.filter_tree)
@@ -1566,10 +1570,12 @@ MultiRasterSeparator;&
             file_name, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
                 "Select channel list file",
-                start_folder("filter"),
+                start_folder("filter", self.default_folder),
                 "Config file (*.cfg);;Display files (*.dsp *.dspf);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
                 "All file types (*.cfg *.dsp *.dspf *.lab *.txt)",
             )
+
+            remember_folder("filter", file_name)
 
             if file_name is None or Path(file_name).suffix.lower() not in (
                 ".cfg",
@@ -1579,8 +1585,6 @@ MultiRasterSeparator;&
                 ".txt",
             ):
                 return
-
-            remember_folder("filter", file_name)
 
         if not isinstance(file_name, dict):
             file_name = Path(file_name)
@@ -2038,13 +2042,15 @@ MultiRasterSeparator;&
         file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save as measurement file",
-            "",
+            start_folder("export"),
             f"{filter};;All files (*.*)",
             filter,
         )
 
         if not file_name:
             return
+
+        remember_folder("export", file_name)
 
         self._progress = setup_progress(parent=self)
         self._progress.finished.connect(self.extract_bus_logging_finished)
@@ -2191,13 +2197,15 @@ MultiRasterSeparator;&
         file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Select output CSV file",
-            "",
+            start_folder("export"),
             "CSV (*.csv);;All files (*.*)",
             "CSV (*.csv)",
         )
 
         if not file_name:
             return
+
+        remember_folder("export", file_name)
 
         self._progress = setup_progress(parent=self)
         self._progress.finished.connect(self.extract_bus_csv_logging_finished)
@@ -2328,12 +2336,13 @@ MultiRasterSeparator;&
         file_names, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "Select CAN database file",
-            "",
+            start_folder("database"),
             "ARXML or DBC (*.dbc *.arxml)",
             "ARXML or DBC (*.dbc *.arxml)",
         )
 
         if file_names:
+            remember_folder("database", file_names[0])
             file_names = [name for name in file_names if Path(name).suffix.lower() in (".arxml", ".dbc")]
 
         if file_names:
@@ -2349,12 +2358,13 @@ MultiRasterSeparator;&
         file_names, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "Select LIN database file",
-            "",
+            start_folder("database"),
             "ARXML or DBC database (*.dbc *.arxml);;LDF database (*.ldf);;All supported formats (*.dbc *.arxml *ldf)",
             "All supported formats (*.dbc *.arxml *ldf)",
         )
 
         if file_names:
+            remember_folder("database", file_names[0])
             file_names = [name for name in file_names if Path(name).suffix.lower() in (".arxml", ".dbc", ".ldf")]
 
         if file_names:
@@ -2905,7 +2915,7 @@ MultiRasterSeparator;&
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Save as measurement file",
-                "",
+                start_folder("export"),
                 f"{filter};;All files (*.*)",
                 default,
             )
@@ -2922,12 +2932,15 @@ MultiRasterSeparator;&
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Select export file",
-                "",
+                start_folder("export"),
                 f"{filters[output_format]};;All files (*.*)",
                 filters[output_format],
             )
 
             version = ""
+
+        if file_name:
+            remember_folder("export", file_name)
 
         if not file_name:
             return

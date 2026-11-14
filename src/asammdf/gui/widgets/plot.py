@@ -127,7 +127,7 @@ from .channel_stats import ChannelStats
 from .cursor import Bookmark, Cursor, Region
 from .dict_to_tree import ComputedChannelInfoWindow
 from .formated_axis import FormatedAxis
-from .tree import ChannelsTreeItem, ChannelsTreeWidget
+from .tree import ChannelsTreeItem, ChannelsTreeWidget, validate_drag_items
 
 bin_ = bin
 
@@ -292,6 +292,9 @@ class PlotSignal(Signal):
         self.y_link = False
 
         self._y_range = None
+        # Gesperrte Signale behalten ihren Y-Bereich, egal was Fit, Home,
+        # Zoom oder die gemeinsame Achse damit vorhaben.
+        self._y_locked = False
         self.y_range = (0, -1)
         self.home = (0, -1)
 
@@ -1498,8 +1501,18 @@ class PlotSignal(Signal):
 
     @y_range.setter
     def y_range(self, value):
+        if self._y_locked:
+            return
         self.path = None
         self._y_range = value
+
+    @property
+    def y_locked(self):
+        return self._y_locked
+
+    @y_locked.setter
+    def y_locked(self, value):
+        self._y_locked = bool(value)
 
 
 from .signal_scale import ScaleDialog
@@ -1591,11 +1604,14 @@ class Plot(QtWidgets.QWidget):
         vbox.setSpacing(1)
         vbox.setContentsMargins(1, 1, 1, 1)
         widget = QtWidgets.QWidget()
+        self._channel_list_options = {
+            "hide_missing_channels": hide_missing_channels,
+            "hide_disabled_channels": hide_disabled_channels,
+        }
         self.channel_selection = ChannelsTreeWidget(
-            hide_missing_channels=hide_missing_channels,
-            hide_disabled_channels=hide_disabled_channels,
             parent=self,
             plot=self,
+            **self._channel_list_options,
         )
 
         widget.setLayout(vbox)
@@ -1641,109 +1657,16 @@ class Plot(QtWidgets.QWidget):
 
         vbox.addLayout(hbox)
 
-        btn = QtWidgets.QPushButton("Cmd")
-
-        menu = QtWidgets.QMenu()
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(
-            icon,
-            "Home",
-            lambda: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_W,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            ),
-        )
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(
-            icon,
-            "Honeywell",
-            lambda: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_H,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            ),
-        )
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(
-            icon,
-            "Fit",
-            lambda: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_F,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            ),
-        )
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/stack.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(
-            icon,
-            "Stack",
-            lambda: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_S,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            ),
-        )
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/increase-font.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(icon, "Increase font", self.increase_font)
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/decrease-font.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        menu.addAction(icon, "Decrease font", self.decrease_font)
-
-        btn.setMenu(menu)
-        hbox.addWidget(btn)
-        btn.menu()
-
-        btn = QtWidgets.QPushButton("")
-        btn.clicked.connect(
-            lambda x: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_I,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            )
-        )
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/zoom-in.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        btn.setIcon(icon)
-        btn.setToolTip("Zoom in")
-        hbox.addWidget(btn)
-
-        btn = QtWidgets.QPushButton("")
-        btn.clicked.connect(
-            lambda x: self.plot.keyPressEvent(
-                QtGui.QKeyEvent(
-                    QtCore.QEvent.Type.KeyPress,
-                    QtCore.Qt.Key.Key_O,
-                    QtCore.Qt.KeyboardModifier.NoModifier,
-                )
-            )
-        )
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/zoom-out.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        btn.setIcon(icon)
-        btn.setToolTip("Zoom out")
-        hbox.addWidget(btn)
+        # Es gibt nur noch EINE Knopfreihe, und die steht ueber der
+        # Kanalliste jedes Strips (siehe _build_list_panel). Die Knoepfe
+        # hier bleiben als Traeger ihres Zustands bestehen - mehrere
+        # Methoden lesen ihr isFlat() -, sind aber unsichtbar. Alle
+        # Befehle dazu stehen im Cmd-Menue des jeweiligen Strips.
+        self._hidden_buttons = QtWidgets.QWidget()
+        hidden_box = QtWidgets.QHBoxLayout(self._hidden_buttons)
+        hidden_box.setContentsMargins(0, 0, 0, 0)
+        vbox.addWidget(self._hidden_buttons)
+        self._hidden_buttons.hide()
 
         if self.enable_zoom_history:
             self.undo_btn = btn = QtWidgets.QPushButton("")
@@ -1752,7 +1675,7 @@ class Plot(QtWidgets.QWidget):
             icon.addPixmap(QtGui.QPixmap(":/undo.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             btn.setIcon(icon)
             btn.setToolTip("Undo zoom")
-            hbox.addWidget(btn)
+            hidden_box.addWidget(btn)
             btn.setEnabled(False)
 
             self.redo_btn = btn = QtWidgets.QPushButton("")
@@ -1761,7 +1684,7 @@ class Plot(QtWidgets.QWidget):
             icon.addPixmap(QtGui.QPixmap(":/redo.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             btn.setIcon(icon)
             btn.setToolTip("Redo zoom")
-            hbox.addWidget(btn)
+            hidden_box.addWidget(btn)
             btn.setEnabled(False)
 
         self.lock_btn = btn = QtWidgets.QPushButton("")
@@ -1771,7 +1694,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/unlocked.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("The Y axis is unlocked. Press to lock")
-        hbox.addWidget(btn)
+        hidden_box.addWidget(btn)
 
         self.locked = False
 
@@ -1782,7 +1705,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/axis_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Hide axis")
-        hbox.addWidget(self.hide_axes_btn)
+        hidden_box.addWidget(self.hide_axes_btn)
 
         self.selected_channel_value_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("selected_channel_value_btn")
@@ -1791,7 +1714,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/number_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Hide axis")
-        hbox.addWidget(self.selected_channel_value_btn)
+        hidden_box.addWidget(self.selected_channel_value_btn)
 
         self.focused_mode_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("focused_mode_btn")
@@ -1800,7 +1723,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/focus_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle focused mode")
-        hbox.addWidget(self.focused_mode_btn)
+        hidden_box.addWidget(self.focused_mode_btn)
 
         self.delta_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("delta_btn")
@@ -1809,7 +1732,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/delta_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle region values display mode")
-        hbox.addWidget(self.delta_btn)
+        hidden_box.addWidget(self.delta_btn)
 
         self.bookmark_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("bookmark_btn")
@@ -1818,7 +1741,7 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(":/bookmark_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle bookmarks")
-        hbox.addWidget(btn)
+        hidden_box.addWidget(btn)
 
         hbox.addStretch()
 
@@ -1834,7 +1757,17 @@ class Plot(QtWidgets.QWidget):
 
         vbox.addWidget(self.selected_channel_value)
 
-        vbox.addWidget(self.channel_selection)
+        # Die Listen stehen untereinander in der linken Spalte, je eine
+        # pro Strip. Die Hoehen werden mit dem Strip-Splitter rechts
+        # gekoppelt, damit jede Liste auf Hoehe ihres Strips sitzt.
+        self.list_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.list_splitter.setOpaqueResize(False)
+        self.list_splitter.setHandleWidth(4)
+        self.list_splitter.setChildrenCollapsible(False)
+        # Die Kanalliste wandert nicht direkt in den Splitter, sondern in
+        # ein Panel mit eigener Knopfreihe - siehe _register_strip.
+        vbox.addWidget(self.list_splitter)
+
         vbox.addWidget(self.cursor_info)
         if timebase_overview:
             self.timebase_overview = TimevaseOverview()
@@ -1867,7 +1800,9 @@ class Plot(QtWidgets.QWidget):
         # self.plot zeigt immer auf den AKTIVEN Strip - dadurch bleiben die
         # rund 180 bestehenden self.plot-Zugriffe unveraendert gueltig.
         self.strips = [self.plot]
+        self.plot.viewport().installEventFilter(self)
         self._syncing_strip_cursor = False
+        self._syncing_strip_heights = False
         if self.plot.cursor1 is not None:
             self.plot.cursor_moved.connect(self._strip_cursor_moved)
         self._strip_kwargs = {
@@ -1882,8 +1817,13 @@ class Plot(QtWidgets.QWidget):
         self.strip_splitter.setOpaqueResize(False)
         self.strip_splitter.setHandleWidth(4)
         self.strip_splitter.addWidget(self.plot)
-    
+        self._register_strip(self.plot, self.channel_selection)
+        self.list_splitter.addWidget(self.plot.list_panel)
+
         self.splitter.addWidget(self.strip_splitter)
+
+        self.strip_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.strip_splitter))
+        self.list_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.list_splitter))
 
         self.info = ChannelStats(
             self.x_unit,
@@ -1915,42 +1855,23 @@ class Plot(QtWidgets.QWidget):
         if signals:
             unitColumnWidth = max([len(signal.unit) + 10 for signal in signals])
 
-        self.channel_selection.setColumnWidth(self.channel_selection.NameColumn, nameColumnWidth)
-        self.channel_selection.setColumnWidth(self.channel_selection.ValueColumn, 83)
-        self.channel_selection.setColumnWidth(self.channel_selection.UnitColumn, unitColumnWidth)
+        # Nur setzen, wenn keine gemerkten Breiten vorliegen - sonst
+        # ueberschreibt dieser Vorgabewert jedes Mal die eingestellten.
+        if not self.channel_selection.user_header_sizes:
+            self.channel_selection.set_header_sizes(
+                {
+                    "NameColumn": nameColumnWidth,
+                    "ValueColumn": 83,
+                    "UnitColumn": unitColumnWidth,
+                }
+            )
+
         self.hide()
 
         if signals:
             self.add_new_channels(signals)
 
-        self.channel_selection.color_changed.connect(self.plot.set_color)
-        self.channel_selection.unit_changed.connect(self.plot.set_unit)
-        self.channel_selection.name_changed.connect(self.plot.set_name)
-        self.channel_selection.conversion_changed.connect(self.set_conversion)
-
-        self.channel_selection.itemsDeleted.connect(self.channel_selection_reduced)
-        self.channel_selection.group_activation_changed.connect(self.plot.update)
-        self.channel_selection.group_activation_changed.connect(self.cursor_moved)
-        self.channel_selection.currentItemChanged.connect(self.channel_selection_row_changed)
-        self.channel_selection.itemSelectionChanged.connect(self.channel_selection_changed)
-        self.channel_selection.add_channels_request.connect(self.add_channels_request)
-        self.channel_selection.set_time_offset.connect(self.plot.set_time_offset)
-        self.channel_selection.show_overlapping_alias.connect(self._show_overlapping_alias)
-        self.channel_selection.show_properties.connect(self._show_properties)
-        self.channel_selection.insert_computation.connect(self.plot.insert_computation)
-        self.channel_selection.edit_computation.connect(self.plot.edit_computation)
-        self.channel_selection.itemClicked.connect(self.flash_curve)
-
-        self.channel_selection.model().dataChanged.connect(self.channel_selection_item_changed)
-
-        self.channel_selection.visible_items_changed.connect(self._update_visibile_entries)
-
-        self.channel_selection.pattern_group_added.connect(self.pattern_group_added_req)
-        self.channel_selection.double_click.connect(self.channel_selection_item_double_clicked)
-
-        self.channel_selection.compute_fft_request.connect(self.compute_fft)
-        self.channel_selection.itemExpanded.connect(self.update_current_values)
-        self.channel_selection.verticalScrollBar().valueChanged.connect(self.update_current_values)
+        self._wire_channel_list(self.channel_selection, self.plot)
 
         self.disabled_keyboard_events = set()
 
@@ -2197,7 +2118,7 @@ class Plot(QtWidgets.QWidget):
                     if destination.pattern:
                         y_range = destination.pattern.get("y_range", (0, 100))
                         for child in children:
-                            self.plot.set_y_range(child.uuid, y_range, emit=False)
+                            self._strip_of(child.uuid).set_y_range(child.uuid, y_range, emit=False)
 
                         if child.uuid == self.plot.current_uuid:
                             self.plot.viewbox.setYRange(*y_range, padding=0)
@@ -2221,6 +2142,9 @@ class Plot(QtWidgets.QWidget):
 
                 if description.get("common_axis", False):
                     item.setCheckState(item.CommonAxisColumn, QtCore.Qt.CheckState.Checked)
+
+                if description.get("y_locked", False):
+                    item.setCheckState(item.LockColumn, QtCore.Qt.CheckState.Checked)
 
                 item.precision = description.get("precision", 3)
 
@@ -2247,43 +2171,74 @@ class Plot(QtWidgets.QWidget):
         self.plot._can_paint = True
         self.plot.update()
 
+        # Kommt die Liste aus einer Konfiguration, haengt an jedem Kanal
+        # seine Stripnummer - dann wird jetzt wieder aufgeteilt.
+        pending = getattr(self, "_pending_strip_count", 0)
+        self._pending_strip_count = 0
+        self.apply_strip_assignment(descriptions, pending)
+
     # ------------------------------------------------------------------
     # Strips (Subplots innerhalb dieses Fensters)
     # ------------------------------------------------------------------
     def add_strip(self, index=None):
-        """Einen weiteren Strip anlegen und zurueckgeben."""
+        """Einen weiteren Strip anlegen und seine Zeichenflaeche zurueckgeben.
+
+        Ein Strip besteht aus einer Zeichenflaeche und einer eigenen
+        Kanalliste daneben.
+        """
         plot = PlotGraphics(parent=self, plot_parent=self, **self._strip_kwargs)
         plot.zoom_changed.connect(self.zoom_changed)
         plot.bookmarks_changed.connect(self.bookmarks_changed)
-    
+        plot.add_channels_request.connect(self.add_channels_request)
+        plot.edit_channel_request.connect(self.edit_channel_request)
+
         if index is None:
             index = len(self.strips)
-    
+
         if plot.cursor1 is not None:
             plot.cursor_moved.connect(self._strip_cursor_moved)
-    
+
+        plot.viewport().installEventFilter(self)
+
+        tree = ChannelsTreeWidget(parent=self, plot=self, **self._channel_list_options)
+        self._wire_channel_list(tree, plot)
+        self._register_strip(plot, tree)
+
         self.strips.insert(index, plot)
         self.strip_splitter.insertWidget(index, plot)
-    
+        self.list_splitter.insertWidget(index, plot.list_panel)
+
         self._relink_strips()
+        self._equalize_strips()
         plot._can_paint = True
         return plot
-    
+
     def remove_strip(self, strip):
         """Einen Strip entfernen. Der letzte bleibt immer stehen."""
         if len(self.strips) <= 1 or strip not in self.strips:
             return False
-    
+
         self.strips.remove(strip)
+
+        tree = getattr(strip, "channel_list", None)
+        if tree is not None:
+            tree.blockSignals(True)
+
+        panel = getattr(strip, "list_panel", None)
+        if panel is not None:
+            panel.setParent(None)
+            panel.deleteLater()
+
         strip.setParent(None)
         strip.close()
-    
+
         if self.plot is strip:
             self.set_active_strip(self.strips[0])
-    
+
         self._relink_strips()
+        self._equalize_strips()
         return True
-    
+
     def move_strip(self, strip, offset):
         """Strip nach oben (-1) oder unten (+1) schieben."""
         if strip not in self.strips:
@@ -2292,34 +2247,654 @@ class Plot(QtWidgets.QWidget):
         new = old + offset
         if not 0 <= new < len(self.strips):
             return False
-    
+
         self.strips.insert(new, self.strips.pop(old))
         self.strip_splitter.insertWidget(new, strip)
+        self.list_splitter.insertWidget(new, strip.list_panel)
         self._relink_strips()
         return True
-    
+
     def set_active_strip(self, strip):
-        """Legt fest, welcher Strip ab jetzt self.plot ist."""
+        """Legt fest, welcher Strip ab jetzt self.plot ist.
+
+        Neu hinzugefuegte Kanaele landen immer im aktiven Strip, weil
+        add_new_channels auf self.plot arbeitet.
+        """
         if strip in self.strips:
             self.plot = strip
-    
+            self.channel_selection = strip.channel_list
+            self._mark_active_strip()
+
+    def _mark_active_strip(self):
+        """Den aktiven Strip mit einem duennen Rahmen kennzeichnen.
+
+        Nur bei mehr als einem Strip - sonst waere der Rahmen nur Unruhe.
+        """
+        many = len(self.strips) > 1
+        for strip in self.strips:
+            if many and strip is self.plot:
+                strip.setFrameShape(QtWidgets.QFrame.Shape.Box)
+                strip.setLineWidth(1)
+            else:
+                strip.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+            tree = getattr(strip, "channel_list", None)
+            if tree is not None:
+                tree.setFrameShape(strip.frameShape())
+
+    def _equalize_strips(self):
+        """Allen Strips die gleiche Hoehe geben.
+
+        Ohne das bekommt ein frisch eingefuegter Strip vom Splitter unter
+        Umstaenden die Hoehe null und ist unsichtbar - es sieht dann aus,
+        als waere nichts passiert.
+        """
+        count = len(self.strips)
+        if count < 2:
+            return
+
+        total = sum(self.strip_splitter.sizes()) or self.strip_splitter.height()
+        if total > 0:
+            self.strip_splitter.setSizes([max(total // count, 1)] * count)
+
+        total = sum(self.list_splitter.sizes()) or self.list_splitter.height()
+        if total > 0:
+            self.list_splitter.setSizes([max(total // count, 1)] * count)
+
+    def eventFilter(self, obj, event):
+        """Ein Klick in einen Strip macht ihn zum aktiven."""
+        if event.type() in (
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.DragEnter,
+            QtCore.QEvent.Type.Drop,
+        ):
+            for strip in self.strips:
+                tree = getattr(strip, "channel_list", None)
+                panel = getattr(strip, "list_panel", None)
+                hit = (
+                    obj is strip.viewport()
+                    or (tree is not None and obj is tree.viewport())
+                    or (panel is not None and obj is panel)
+                )
+                if hit:
+                    if strip is not self.plot:
+                        self.set_active_strip(strip)
+                    break
+
+        return super().eventFilter(obj, event)
+
+    def add_strip_action(self):
+        """Neuen Strip unter dem aktiven anlegen und dorthin wechseln."""
+        index = self.strips.index(self.plot) + 1 if self.plot in self.strips else None
+        self.set_active_strip(self.add_strip(index))
+
+    def move_strip_action(self, offset):
+        self.move_strip(self.plot, offset)
+
+    def delete_strip_action(self):
+        self.remove_strip(self.plot)
+
+    def move_signals_between_strips(self, source_tree, target_strip, destination=None):
+        """Markierte Eintraege aus einem Strip in einen anderen verschieben.
+
+        Ohne das legt der Drag&Drop im Zielstrip eine zweite Kopie an und
+        das Signal steht danach in beiden Strips.
+        """
+        items = validate_drag_items(source_tree.invisibleRootItem(), source_tree.selectedItems(), [])
+
+        return self.move_items_to_strip(source_tree, items, target_strip, destination=destination)
+
+    def move_items_to_strip(self, source_tree, items, target_strip, destination=None):
+        """Bestimmte Eintraege in einen anderen Strip umhaengen."""
+        source_strip = getattr(source_tree, "owner_plot", None)
+        target_tree = getattr(target_strip, "channel_list", None)
+
+        if source_strip is None or target_tree is None or source_strip is target_strip:
+            return False
+
+        if not items:
+            return False
+
+        # Gruppen mitnehmen, aber die Signale darin einzeln umhaengen.
+        channel_items = []
+        stack = list(items)
+        while stack:
+            item = stack.pop()
+            if item.type() == ChannelsTreeItem.Channel:
+                channel_items.append(item)
+            elif item.type() == ChannelsTreeItem.Group:
+                stack.extend(item.child(i) for i in range(item.childCount()))
+
+        signals = {}
+        for item in channel_items:
+            pair = source_strip._uuid_map.get(item.uuid)
+            if pair is not None:
+                signals[item.uuid] = pair[0]
+
+        if not signals:
+            return False
+
+        individual = [item for item in channel_items if item.signal.individual_axis]
+        locked = [item for item in channel_items if item.signal.y_locked]
+
+        source_tree.setUpdatesEnabled(False)
+        target_tree.setUpdatesEnabled(False)
+        source_tree.blockSignals(True)
+        target_tree.blockSignals(True)
+        try:
+            root = source_tree.invisibleRootItem()
+            for item in items:
+                (item.parent() or root).removeChild(item)
+
+            source_strip.delete_channels(list(signals))
+
+            # Darstellung mitnehmen - sonst bekommt das Signal im neuen
+            # Strip wieder den vollen Bereich und das Rohformat.
+            descriptions = {
+                uuid: {
+                    "enabled": bool(sig.enable),
+                    "format": sig.format,
+                    "y_range": list(sig.y_range),
+                    "y_locked": bool(sig.y_locked),
+                }
+                for uuid, sig in signals.items()
+            }
+
+            target_strip._can_paint = False
+            new_signals = target_strip.add_new_channels(signals, descriptions=descriptions)
+
+            for item in channel_items:
+                signal = new_signals.get(item.uuid)
+                if signal is not None:
+                    item.signal = signal
+
+            if destination is not None and destination.type() == ChannelsTreeItem.Group:
+                destination.addChildren(items)
+            else:
+                target_tree.addTopLevelItems(items)
+        finally:
+            source_tree.blockSignals(False)
+            target_tree.blockSignals(False)
+            source_tree.setUpdatesEnabled(True)
+            target_tree.setUpdatesEnabled(True)
+            target_strip._can_paint = True
+
+        # Eine eigene Achse ueberlebt den Umzug nicht von selbst, weil
+        # PlotSignal.individual_axis beim Neuanlegen auf False steht.
+        for item in individual:
+            target_strip.set_individual_axis(item.uuid, True)
+
+        for item in locked:
+            target_strip.set_y_locked(item.uuid, True)
+
+        for tree in (source_tree, target_tree):
+            tree.update_channel_groups_count()
+            tree.refresh()
+
+        self.set_active_strip(target_strip)
+        self._update_visibile_entries()
+        source_strip.update()
+        target_strip.update()
+
+        return True
+
+    def apply_strip_assignment(self, descriptions, strip_count=0):
+        """Nach dem Laden einer Konfiguration die Strips wiederherstellen.
+
+        Beim Speichern haengt an jedem Kanal seine Stripnummer. Geladen
+        wird alles zuerst in den ersten Strip - hier wird es wieder
+        auseinandersortiert.
+        """
+        descriptions = descriptions or {}
+
+        tree = self.strips[0].channel_list
+        root = tree.invisibleRootItem()
+
+        pairs = []
+        for i in range(root.childCount()):
+            item = root.child(i)
+            index = self._strip_index_of_item(item, descriptions)
+            if index:
+                pairs.append((item, index))
+
+        wanted = max([index for _item, index in pairs], default=0) + 1
+        wanted = max(wanted, int(strip_count or 0))
+
+        if wanted <= 1 and not pairs:
+            return
+
+        while len(self.strips) < wanted:
+            self.add_strip()
+
+        for item, index in pairs:
+            if index < len(self.strips):
+                self.move_items_to_strip(tree, [item], self.strips[index])
+
+        for strip in self.strips:
+            self._restore_strip_state(strip, descriptions)
+
+        self.set_active_strip(self.strips[0])
+        self._equalize_strips()
+
+    def _restore_strip_state(self, strip, descriptions):
+        """Y-Bereiche und gemeinsame Achse aus der Konfiguration setzen.
+
+        Beim Laden landen zuerst alle Kanaele in Strip 1 und haengen dort
+        an einer einzigen gemeinsamen Achse. Deren Bereich passt nach dem
+        Aufteilen nicht mehr - ein Signal mit Werten um 1 waere in einem
+        Bereich von 2200 bis 2700 schlicht unsichtbar.
+        """
+        tree = getattr(strip, "channel_list", None)
+        if tree is None:
+            return
+
+        members = []
+
+        # Mitgliedschaft neu aufbauen, sonst zeigt der Haken in der Liste
+        # etwas anderes an als der Strip tatsaechlich fuehrt.
+        strip.common_axis_items.clear()
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+
+            if item.type() != ChannelsTreeItem.Channel:
+                continue
+
+            description = descriptions.get(item.uuid, None)
+            if not description:
+                continue
+
+            try:
+                signal, _index = strip.signal_by_uuid(item.uuid)
+            except KeyError:
+                continue
+
+            y_range = description.get("y_range", None)
+            if y_range and len(y_range) == 2:
+                was_locked = signal.y_locked
+                signal.y_locked = False
+                signal.y_range = tuple(sorted(float(e) for e in y_range))
+                signal.y_locked = was_locked
+
+            if description.get("common_axis", False):
+                members.append(item.uuid)
+
+        if members:
+            # Der erste Eintrag gibt den Bereich der gemeinsamen Achse vor.
+            for uuid in members:
+                strip.set_common_axis(uuid, True)
+        else:
+            strip.common_axis_label = ""
+            if strip.current_uuid is not None:
+                strip.set_current_uuid(strip.current_uuid, True)
+
+        strip.update()
+
+    def _strip_index_of_item(self, item, descriptions):
+        """Stripnummer eines Eintrags - bei Gruppen die des ersten Kanals."""
+        stack = [item]
+        while stack:
+            current = stack.pop(0)
+
+            description = descriptions.get(current.uuid, None)
+            if description is not None and "strip" in description:
+                return int(description["strip"] or 0)
+
+            if current.type() == ChannelsTreeItem.Group:
+                stack.extend(current.child(i) for i in range(current.childCount()))
+
+        return 0
+
+    def set_strip_sizes(self, sizes):
+        """Hoehen der Strips aus der Konfiguration uebernehmen."""
+        sizes = [int(e) for e in sizes or []]
+
+        if len(sizes) != self.strip_splitter.count() or not all(sizes):
+            return
+
+        self.strip_splitter.setSizes(sizes)
+        self._sync_strip_heights(self.strip_splitter)
+
+    def _strip_set_color(self, uuid, color):
+        """Farbe am besitzenden Strip setzen, nicht am aktiven."""
+        strip, _sig, _idx = self.strip_signal_by_uuid(uuid)
+        strip.set_color(uuid, color)
+
+    def _strip_set_unit(self, uuid, unit):
+        strip, _sig, _idx = self.strip_signal_by_uuid(uuid)
+        strip.set_unit(uuid, unit)
+
+    def _strip_set_name(self, uuid, name):
+        strip, _sig, _idx = self.strip_signal_by_uuid(uuid)
+        strip.set_name(uuid, name)
+
     def _relink_strips(self):
         """x-Achsen koppeln, Cursor koppeln, Zeitachse nur unten zeigen."""
         master = self.strips[0].plotItem.vb
-    
+
         for i, plot in enumerate(self.strips):
             vb = plot.plotItem.vb
             vb.setXLink(None)
             if i:
                 vb.setXRange(*master.viewRange()[0], padding=0)
                 vb.setXLink(master)
-    
+
             # Zeitachse nur beim untersten Strip
             if i == len(self.strips) - 1:
                 plot.plotItem.showAxis("bottom")
             else:
                 plot.plotItem.hideAxis("bottom")
-    
+
+        self._number_strips()
+        self._mark_active_strip()
+
+    def _register_strip(self, plot, tree):
+        """Zeichenflaeche und zugehoerige Kanalliste aneinander binden."""
+        plot.channel_list = tree
+        tree.owner_plot = plot
+        tree.viewport().installEventFilter(self)
+        plot.list_panel = self._build_list_panel(plot, tree)
+
+    def _build_list_panel(self, plot, tree):
+        """Kanalliste mit eigener Knopfreihe darueber.
+
+        Die Knoepfe wirken immer auf GENAU diesen Strip - damit ist
+        eindeutig, welchen Strip "nach oben" verschiebt.
+        """
+        panel = QtWidgets.QWidget()
+        panel.installEventFilter(self)
+        vbox = QtWidgets.QVBoxLayout(panel)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(1)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(1)
+
+        cmd = QtWidgets.QPushButton("Cmd")
+        cmd.setMenu(self._build_strip_menu(plot))
+        cmd.setToolTip("Befehle fuer diesen Strip")
+        row.addWidget(cmd)
+
+        buttons = (
+            ("▲", "Diesen Strip nach oben schieben", lambda: self.move_strip(plot, -1)),
+            ("▼", "Diesen Strip nach unten schieben", lambda: self.move_strip(plot, 1)),
+        )
+
+        for text, tip, slot in buttons:
+            btn = QtWidgets.QPushButton(text)
+            btn.setToolTip(tip)
+            btn.setFixedWidth(24)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+
+        # Die vier Umschalter, die als Knopf sichtbar bleiben sollen.
+        # Ihren Zustand (Symbol, flach/erhaben) halten weiterhin die
+        # unsichtbaren Knoepfe des Fensters - _sync_strip_buttons kopiert
+        # ihn auf alle Strips.
+        plot.strip_buttons = {}
+        for name, master in (
+            ("focused", self.focused_mode_btn),
+            ("delta", self.delta_btn),
+            ("bookmarks", self.bookmark_btn),
+        ):
+            btn = QtWidgets.QPushButton("")
+            btn.setFixedWidth(24)
+            btn.setIcon(master.icon())
+            btn.setFlat(master.isFlat())
+            btn.setToolTip(master.toolTip())
+            btn.clicked.connect(partial(self._strip_button_clicked, name, plot))
+            row.addWidget(btn)
+            plot.strip_buttons[name] = btn
+
+        label = QtWidgets.QLabel("")
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        plot.strip_label = label
+        row.addStretch()
+        row.addWidget(label)
+
+        vbox.addLayout(row)
+        vbox.addWidget(tree)
+
+        return panel
+
+    def _build_strip_menu(self, plot):
+        """Cmd-Menue eines Strips - die einzige Knopfebene im Fenster.
+
+        Alles, was frueher in der Werkzeugleiste oben stand, liegt hier.
+        Die Umschalter arbeiten auf self.plot; damit das immer dieser
+        Strip ist, macht aboutToShow ihn vorher zum aktiven Strip.
+        """
+
+        def key(code):
+            return lambda: plot.keyPressEvent(
+                QtGui.QKeyEvent(
+                    QtCore.QEvent.Type.KeyPress,
+                    code,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
+                )
+            )
+
+        menu = QtWidgets.QMenu()
+
+        def entry(png, text, slot):
+            icon = QtGui.QIcon()
+            icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+            return menu.addAction(icon, text, slot)
+
+        entry(":/home.png", "Home", key(QtCore.Qt.Key.Key_W))
+        entry(":/fit.png", "Fit", key(QtCore.Qt.Key.Key_F))
+        entry(":/axis.png", "Honeywell", key(QtCore.Qt.Key.Key_H))
+        entry(":/stack.png", "Stack", key(QtCore.Qt.Key.Key_S))
+
+        menu.addSeparator()
+        entry(":/zoom-in.png", "Zoom hinein", key(QtCore.Qt.Key.Key_I))
+        entry(":/zoom-out.png", "Zoom heraus", key(QtCore.Qt.Key.Key_O))
+        undo = entry(":/undo.png", "Zoom zurueck", self.undo_zoom)
+        redo = entry(":/redo.png", "Zoom vorwaerts", self.redo_zoom)
+        menu._strip_zoom_actions = (undo, redo)
+
+        menu.addSeparator()
+        entry(":/increase-font.png", "Schrift groesser", self.increase_font)
+        entry(":/decrease-font.png", "Schrift kleiner", self.decrease_font)
+
+        menu.addSeparator()
+        # Nur die Umschalter, fuer die es keinen eigenen Knopf gibt.
+        toggles = {}
+        for name, text in (
+            ("hide_axes", "Achsen ausblenden"),
+            ("value_panel", "Wertefeld oben rechts ausblenden"),
+            ("locked", "Alle Y-Achsen dieses Strips sperren"),
+        ):
+            action = menu.addAction(text)
+            action.setCheckable(True)
+            action.toggled.connect(partial(self._strip_toggle, name, plot))
+            toggles[name] = action
+        menu._strip_toggles = toggles
+
+        menu.addSeparator()
+        menu.addAction("Strip darueber einfuegen", lambda: self._add_strip_above(plot))
+        menu.addAction("Strip darunter einfuegen", lambda: self._add_strip_below(plot))
+        menu.addAction("Strip nach oben", lambda: self.move_strip(plot, -1))
+        menu.addAction("Strip nach unten", lambda: self.move_strip(plot, 1))
+        menu.addAction("Strip loeschen", lambda: self.remove_strip(plot))
+
+        menu.aboutToShow.connect(partial(self._strip_menu_about_to_show, plot, menu))
+
+        return menu
+
+    def _strip_menu_about_to_show(self, plot, menu):
+        """Haken im Cmd-Menue an den tatsaechlichen Zustand anpassen."""
+        self.set_active_strip(plot)
+
+        toggles = getattr(menu, "_strip_toggles", {})
+        state = {
+            "locked": bool(self.locked),
+            "hide_axes": self.hide_axes_btn.isFlat(),
+            "value_panel": self.selected_channel_value_btn.isFlat(),
+            "focused": bool(self.focused_mode),
+            "delta": self.region_values_display_mode == "delta",
+            "bookmarks": bool(self.show_bookmarks),
+        }
+
+        for name, action in toggles.items():
+            action.blockSignals(True)
+            action.setChecked(state[name])
+            action.blockSignals(False)
+
+        undo, redo = getattr(menu, "_strip_zoom_actions", (None, None))
+        has_history = self.enable_zoom_history and hasattr(self, "undo_btn")
+        if undo is not None:
+            undo.setEnabled(has_history and self.undo_btn.isEnabled())
+        if redo is not None:
+            redo.setEnabled(has_history and self.redo_btn.isEnabled())
+
+    def _strip_button_clicked(self, name, plot):
+        """Einer der vier Umschaltknoepfe in der Reihe eines Strips."""
+        self.set_active_strip(plot)
+
+        if name == "hide_axes":
+            self.hide_axes()
+        elif name == "focused":
+            self.toggle_focused_mode()
+        elif name == "delta":
+            self.toggle_region_values_display_mode()
+        elif name == "bookmarks":
+            self.toggle_bookmarks()
+
+    def _sync_strip_buttons(self):
+        """Symbole der Strip-Knoepfe an den Fensterzustand angleichen."""
+        masters = {
+            "hide_axes": getattr(self, "hide_axes_btn", None),
+            "focused": getattr(self, "focused_mode_btn", None),
+            "delta": getattr(self, "delta_btn", None),
+            "bookmarks": getattr(self, "bookmark_btn", None),
+        }
+
+        for strip in getattr(self, "strips", []):
+            for name, btn in getattr(strip, "strip_buttons", {}).items():
+                master = masters.get(name)
+                if master is None:
+                    continue
+                btn.setIcon(master.icon())
+                btn.setFlat(master.isFlat())
+                btn.setToolTip(master.toolTip())
+
+    def _strip_toggle(self, name, plot, checked):
+        """Umschalter aus dem Cmd-Menue eines Strips."""
+        self.set_active_strip(plot)
+
+        if name == "locked":
+            self.set_locked(locked=checked)
+            self._settings.setValue("plot/locked", checked)
+        elif name == "hide_axes":
+            self.hide_axes(hide=checked)
+            self._settings.setValue("plot/hide_axes", checked)
+        elif name == "value_panel":
+            self.hide_selected_channel_value(hide=checked)
+            self._settings.setValue("plot/hide_selected_channel_value", checked)
+        elif name == "focused":
+            self.toggle_focused_mode(focused=checked)
+            self._settings.setValue("plot/focused_mode", checked)
+        elif name == "delta":
+            mode = "delta" if checked else "value"
+            self.toggle_region_values_display_mode(mode=mode)
+            self._settings.setValue("plot/region_values_display_mode", mode)
+        elif name == "bookmarks":
+            self.toggle_bookmarks(hide=not checked)
+            self._settings.setValue("plot/bookmarks", checked)
+
+    def _add_strip_above(self, plot):
+        index = self.strips.index(plot) if plot in self.strips else None
+        self.set_active_strip(self.add_strip(index))
+
+    def _add_strip_below(self, plot):
+        index = self.strips.index(plot) + 1 if plot in self.strips else None
+        self.set_active_strip(self.add_strip(index))
+
+    def _number_strips(self):
+        """Beschriftung "Strip n" aktuell halten."""
+        many = len(self.strips) > 1
+        for i, plot in enumerate(self.strips, 1):
+            label = getattr(plot, "strip_label", None)
+            if label is not None:
+                label.setText(f"Strip {i}" if many else "")
+
+    def _wire_channel_list(self, tree, plot):
+        """Alle Verbindungen einer Kanalliste herstellen.
+
+        Frueher stand das als ein Block in __init__ - jetzt braucht es
+        jeder Strip, also ist es eine eigene Methode.
+        """
+        tree.color_changed.connect(self._strip_set_color)
+        tree.unit_changed.connect(self._strip_set_unit)
+        tree.name_changed.connect(self._strip_set_name)
+        tree.conversion_changed.connect(self.set_conversion)
+
+        tree.itemsDeleted.connect(self.channel_selection_reduced)
+        tree.group_activation_changed.connect(plot.update)
+        tree.group_activation_changed.connect(self.cursor_moved)
+        tree.currentItemChanged.connect(self.channel_selection_row_changed)
+        tree.itemSelectionChanged.connect(self.channel_selection_changed)
+        tree.add_channels_request.connect(self.add_channels_request)
+        tree.set_time_offset.connect(plot.set_time_offset)
+        tree.show_overlapping_alias.connect(self._show_overlapping_alias)
+        tree.show_properties.connect(self._show_properties)
+        tree.insert_computation.connect(plot.insert_computation)
+        tree.edit_computation.connect(plot.edit_computation)
+        tree.itemClicked.connect(self.flash_curve)
+
+        tree.model().dataChanged.connect(self.channel_selection_item_changed)
+
+        tree.visible_items_changed.connect(self._update_visibile_entries)
+
+        tree.pattern_group_added.connect(self.pattern_group_added_req)
+        tree.double_click.connect(self.channel_selection_item_double_clicked)
+
+        tree.compute_fft_request.connect(self.compute_fft)
+        tree.itemExpanded.connect(self.update_current_values)
+        tree.verticalScrollBar().valueChanged.connect(self.update_current_values)
+
+    def _sync_strip_heights(self, source):
+        """Hoehen der beiden Spalten gleich halten.
+
+        Links stehen die Kanallisten, rechts die Zeichenflaechen. Zieht
+        man eine Trennlinie, muss die andere Spalte folgen, sonst sitzt
+        eine Liste nicht mehr auf Hoehe ihres Strips.
+        """
+        if self._syncing_strip_heights:
+            return
+
+        target = self.strip_splitter if source is self.list_splitter else self.list_splitter
+        sizes = source.sizes()
+        if len(sizes) != target.count():
+            return
+
+        self._syncing_strip_heights = True
+        try:
+            target.setSizes(sizes)
+        finally:
+            self._syncing_strip_heights = False
+
+    def channel_lists(self):
+        """Alle Kanallisten des Fensters, in Strip-Reihenfolge."""
+        return [plot.channel_list for plot in self.strips if getattr(plot, "channel_list", None) is not None]
+
+    def _strip_of(self, uuid):
+        """Den Strip liefern, der dieses Signal haelt.
+
+        Faellt auf den aktiven Strip zurueck, wenn die uuid nirgends
+        bekannt ist - damit verhaelt sich alles wie vorher, falls ein
+        Aufrufer mit einer veralteten uuid kommt.
+        """
+        try:
+            strip, _sig, _idx = self.strip_signal_by_uuid(uuid)
+        except KeyError:
+            return self.plot
+
+        return strip
+
     def strip_signal_by_uuid(self, uuid):
         """(strip, signal, index) - sucht ueber ALLE Strips.
         Die Kanalliste gehoert dem Fenster, die Signale liegen aber in den
@@ -2333,12 +2908,12 @@ class Plot(QtWidgets.QWidget):
             if pair is not None:
                 return (strip, *pair)
         raise KeyError(uuid)
-    
+
     def _strip_cursor_moved(self, cursor):
         """Cursorposition auf alle anderen Strips uebertragen."""
         if self._syncing_strip_cursor:
             return
-    
+
         self._syncing_strip_cursor = True
         try:
             pos = cursor.value()
@@ -2350,13 +2925,22 @@ class Plot(QtWidgets.QWidget):
         finally:
             self._syncing_strip_cursor = False
     def adjust_splitter(self, initial=False):
+        """Breite der Kanallisten an ihren Inhalt anpassen.
+
+        Frueher bemass das die linke Spalte. Seit jeder Strip seine eigene
+        Liste neben der Zeichenflaeche hat, gilt es fuer diese Listen.
+        """
         size = sum(self.splitter.sizes())
+        tree = self.channel_selection
+        if tree is None:
+            return
 
-        if Plot.dynamic_columns_width or initial:
-            self.channel_selection.resizeColumnToContents(self.channel_selection.NameColumn)
-            self.channel_selection.resizeColumnToContents(self.channel_selection.UnitColumn)
+        # Hat der Benutzer die Breiten selbst eingestellt, bleiben sie
+        # stehen - sonst wuerde jeder neue Kanal sie wieder verwerfen.
+        if (Plot.dynamic_columns_width or initial) and not getattr(tree, "user_header_sizes", False):
+            tree.resize_columns_to_contents(tree.NameColumn, tree.UnitColumn)
 
-        width = sum(self.channel_selection.columnWidth(col) for col in range(self.channel_selection.columnCount()))
+        width = sum(tree.columnWidth(col) for col in range(tree.columnCount()))
 
         if width > self.splitter.sizes()[0]:
             if size - width >= 300:
@@ -2437,6 +3021,7 @@ class Plot(QtWidgets.QWidget):
             channel["unit"] = sig.unit
 
         channel["y_range"] = [float(e) for e in sig.y_range]
+        channel["y_locked"] = bool(sig.y_locked)
         channel["origin_uuid"] = str(sig.origin_uuid)
 
         if sig.flags & Signal.Flags.user_defined_conversion:
@@ -2483,7 +3068,18 @@ class Plot(QtWidgets.QWidget):
                 self.plot.update()
 
     def channel_selection_item_changed(self, top_left, bottom_right, roles):
-        item = self.channel_selection.itemFromIndex(top_left)
+        # Der Index gilt fuer das Modell der Liste, die das Signal geschickt
+        # hat - nicht zwangslaeufig fuer die aktive Liste.
+        model = self.sender()
+        tree = self.channel_selection
+        for candidate in self.channel_lists():
+            if candidate.model() is model:
+                tree = candidate
+                break
+
+        item = tree.itemFromIndex(top_left)
+        if item is None:
+            return
 
         if item.uuid == self.info_uuid:
             palette = self.selected_channel_value.palette()
@@ -2532,7 +3128,7 @@ class Plot(QtWidgets.QWidget):
                 except KeyError:
                     return
                 strip.set_signal_enable(item.uuid, item.checkState(column))
-            if not enabled and self.channel_selection.hide_disabled_channels:
+            if not enabled and tree.hide_disabled_channels:
                 item.setHidden(True)
 
         elif column == item.CommonAxisColumn:
@@ -2540,12 +3136,25 @@ class Plot(QtWidgets.QWidget):
                 enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
                 if enabled != item.signal.y_link:
                     item.signal.y_link = enabled
-                    self.plot.set_common_axis(item.uuid, enabled)
+                    self._strip_of(item.uuid).set_common_axis(item.uuid, enabled)
 
         elif column == item.IndividualAxisColumn:
             enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
             if enabled != item.signal.individual_axis:
-                self.plot.set_individual_axis(item.uuid, enabled)
+                self._strip_of(item.uuid).set_individual_axis(item.uuid, enabled)
+
+        elif column == item.LockColumn:
+            enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
+            if enabled != item.signal.y_locked:
+                uuids = self._strip_of(item.uuid).set_y_locked(item.uuid, enabled)
+
+                # Auf der gemeinsamen Achse haengen mehrere Signale an
+                # derselben Sperre - deren Haken muessen mitziehen.
+                state = QtCore.Qt.CheckState.Checked if enabled else QtCore.Qt.CheckState.Unchecked
+                for other in self.iter_channel_items():
+                    if other is not item and other.uuid in uuids:
+                        if other.checkState(other.LockColumn) != state:
+                            other.setCheckState(other.LockColumn, state)
 
     def channel_selection_item_double_clicked(self, item, button):
         if item is None:
@@ -2575,17 +3184,27 @@ class Plot(QtWidgets.QWidget):
                     item.setExpanded(not item.isExpanded())
 
     def channel_selection_reduced(self, deleted):
-        self.plot.delete_channels(deleted)
+        # Jeder Strip bekommt nur die uuids, die ihm gehoeren. Sonst wuerde
+        # ein Loeschen in Strip 2 die Kurven aus Strip 1 entfernen.
+        by_strip = {}
+        for uuid in deleted:
+            strip = self._strip_of(uuid)
+            by_strip.setdefault(id(strip), (strip, []))[1].append(uuid)
+
+        for strip, uuids in by_strip.values():
+            strip.delete_channels(uuids)
 
         if self.info_uuid in deleted:
             self.info_uuid = None
             self.info.hide()
 
+        # Das Fenster schliesst erst, wenn ALLE Strips leer sind.
         count = 0
-        iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while iterator.value():
-            count += 1
-            iterator += 1
+        for tree in self.channel_lists():
+            iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+            while iterator.value():
+                count += 1
+                iterator += 1
 
         if not count:
             self.info_uuid = None
@@ -2600,10 +3219,10 @@ class Plot(QtWidgets.QWidget):
                 uuid = item.uuid
                 self.info_uuid = uuid
 
-                self.plot.set_current_uuid(self.info_uuid)
+                self._strip_of(self.info_uuid).set_current_uuid(self.info_uuid)
 
                 if self.info.isVisible():
-                    stats = self.plot.get_stats(self.info_uuid)
+                    stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
                     self.info.set_stats(stats)
 
                 if len(self.channel_selection.selectedItems()) == 1:
@@ -2699,7 +3318,7 @@ class Plot(QtWidgets.QWidget):
 
         self.info_uuid = sig.uuid
 
-        self.plot.set_current_uuid(self.info_uuid, True)
+        self._strip_of(self.info_uuid).set_current_uuid(self.info_uuid, True)
 
     def compute_fft(self, uuid):
         _strip, signal, _index = self.strip_signal_by_uuid(uuid)
@@ -2775,7 +3394,7 @@ class Plot(QtWidgets.QWidget):
                         self.selected_channel_value.setText(elided)  # (f"{value} {unit}")
 
         if self.info.isVisible():
-            stats = self.plot.get_stats(self.info_uuid)
+            stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
         if not self._inhibit_timestamp_signals:
@@ -2810,7 +3429,7 @@ class Plot(QtWidgets.QWidget):
             iterator += 1
 
         if self.info.isVisible():
-            stats = self.plot.get_stats(self.info_uuid)
+            stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
         self.cursor_removed_signal.emit(self)
@@ -2840,7 +3459,7 @@ class Plot(QtWidgets.QWidget):
         super().dragEnterEvent(e)
 
     def dropEvent(self, e):
-        if e.source() is self.channel_selection:
+        if e.source() in self.channel_lists():
             super().dropEvent(e)
         else:
             data = e.mimeData()
@@ -2878,6 +3497,7 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.hide_axes_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
     def hide_selected_channel_value(self, event=None, hide=None):
         if hide is None:
@@ -2900,6 +3520,7 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.selected_channel_value_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
     def increase_font(self):
         font = self.font()
@@ -2914,7 +3535,7 @@ class Plot(QtWidgets.QWidget):
     def info_precision_modified(self):
         if not self.closed:
             if self.info_uuid is not None:
-                stats = self.plot.get_stats(self.info_uuid)
+                stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
                 self.info.set_stats(stats)
 
     def _inhibit_timestamp_handler(self):
@@ -2950,7 +3571,7 @@ class Plot(QtWidgets.QWidget):
                 )
 
                 if self.info_uuid:
-                    stats = self.plot.get_stats(self.info_uuid)
+                    stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
                     self.info.set_stats(stats)
 
         elif key == QtCore.Qt.Key.Key_2 and modifiers == QtCore.Qt.KeyboardModifier.NoModifier:
@@ -3017,7 +3638,7 @@ class Plot(QtWidgets.QWidget):
                         item.pattern["integer_format"] = fmt
 
             if self.info.isVisible():
-                stats = self.plot.get_stats(self.info_uuid)
+                stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
                 self.info.set_stats(stats)
 
             self.current_uuid_changed(self.plot.current_uuid)
@@ -3251,7 +3872,7 @@ class Plot(QtWidgets.QWidget):
                     if y_range is None:
                         continue
 
-                    self.plot.set_y_range(sig.uuid, y_range, emit=False)
+                    self._strip_of(sig.uuid).set_y_range(sig.uuid, y_range, emit=False)
 
                 self.plot.viewbox.setXRange(*snapshot["x"], padding=0)
 
@@ -3367,7 +3988,7 @@ class Plot(QtWidgets.QWidget):
                         item.set_value("n.a.", "n.a.")
 
         if self.info.isVisible():
-            stats = self.plot.get_stats(self.info_uuid)
+            stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
         self._prev_region = (start, stop)
@@ -3446,7 +4067,7 @@ class Plot(QtWidgets.QWidget):
         if self.plot.cursor1:
             self.plot.cursor_moved.emit(self.plot.cursor1)
         if self.info.isVisible():
-            stats = self.plot.get_stats(self.info_uuid)
+            stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
         self.region_removed_signal.emit(self)
@@ -3465,7 +4086,7 @@ class Plot(QtWidgets.QWidget):
                 if y_range is None:
                     continue
 
-                self.plot.set_y_range(sig.uuid, y_range, emit=False)
+                self._strip_of(sig.uuid).set_y_range(sig.uuid, y_range, emit=False)
 
             self.plot.viewbox.setXRange(*snapshot["x"], padding=0)
 
@@ -3483,7 +4104,7 @@ class Plot(QtWidgets.QWidget):
         return set(uuids)
 
     def set_conversion(self, uuid, conversion):
-        self.plot.set_conversion(uuid, conversion)
+        self._strip_of(uuid).set_conversion(uuid, conversion)
         self.cursor_moved()
 
     def set_font_size(self, size):
@@ -3516,8 +4137,10 @@ class Plot(QtWidgets.QWidget):
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.lock_btn.setToolTip(tooltip)
         self.lock_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
-        self.channel_selection.setColumnHidden(self.channel_selection.CommonAxisColumn, locked)
+        for tree in self.channel_lists():
+            tree.setColumnHidden(tree.CommonAxisColumn, locked)
 
         self.locked = locked
         self.plot.set_locked(locked)
@@ -3611,12 +4234,36 @@ class Plot(QtWidgets.QWidget):
 
             return channels
 
+        def all_strips_to_config():
+            """Kanaele aller Strips, jeder Eintrag mit seiner Stripnummer.
+
+            Alles landet weiterhin in einer einzigen Liste, damit eine
+            Konfiguration auch im unveraenderten asammdf noch laedt -
+            dort erscheinen dann eben alle Kanaele in einem Plot.
+            """
+            def tag(entries, index):
+                for entry in entries:
+                    entry["strip"] = index
+                    if entry.get("type") == "group":
+                        tag(entry.get("channels", []), index)
+
+            channels = []
+
+            for index, strip in enumerate(self.strips):
+                tree = getattr(strip, "channel_list", None)
+                if tree is None:
+                    continue
+
+                entries = item_to_config(tree, tree.invisibleRootItem())
+                tag(entries, index)
+                channels.extend(entries)
+
+            return channels
+
         config = {
-            "channels": (
-                item_to_config(self.channel_selection, self.channel_selection.invisibleRootItem())
-                if not self.pattern
-                else []
-            ),
+            "channels": all_strips_to_config() if not self.pattern else [],
+            "strip_count": len(self.strips),
+            "strip_sizes": [int(e) for e in self.strip_splitter.sizes()],
             "pattern": self.pattern,
             "splitter": [int(e) for e in self.splitter.sizes()[:2]]
             + [
@@ -3677,6 +4324,7 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.bookmark_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
         if hide is None:
             self._settings.setValue("plot/bookmarks", not self.bookmark_btn.isFlat())
@@ -3708,6 +4356,7 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.focused_mode_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
     def toggle_region_values_display_mode(self, event=None, mode=None):
         if mode is None:
@@ -3729,28 +4378,31 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.delta_btn.setIcon(icon)
+        self._sync_strip_buttons()
 
         if mode is None:
             self._settings.setValue("plot/region_values_display_mode", self.region_values_display_mode)
 
         self.range_modified()
 
-        iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while item := iterator.value():
-            if item.type() == ChannelsTreeItem.Channel:
-                item.set_value(update=True, force=True)
+        for item in self.iter_channel_items():
+            item.set_value(update=True, force=True)
 
-            iterator += 1
+    def iter_channel_items(self):
+        """Alle Kanaleintraege aller Strips durchlaufen."""
+        for tree in self.channel_lists():
+            iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+            while item := iterator.value():
+                iterator += 1
+                if item.type() == ChannelsTreeItem.Channel:
+                    yield item
 
     def toggle_same_origin_signals(self, origin_uuid="", visible=True):
         state = QtCore.Qt.CheckState.Checked if visible else QtCore.Qt.CheckState.Unchecked
 
-        iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while item := iterator.value():
-            if item.type() == item.Channel and item.signal.origin_uuid == origin_uuid:
+        for item in self.iter_channel_items():
+            if item.signal.origin_uuid == origin_uuid:
                 item.setCheckState(item.NameColumn, state)
-
-            iterator += 1
 
     def undo_zoom(self):
         if self.enable_zoom_history and self.zoom_history:
@@ -3766,7 +4418,7 @@ class Plot(QtWidgets.QWidget):
                 if y_range is None:
                     continue
 
-                self.plot.set_y_range(sig.uuid, y_range, emit=False)
+                self._strip_of(sig.uuid).set_y_range(sig.uuid, y_range, emit=False)
 
             self.plot.viewbox.setXRange(*snapshot["x"], padding=0)
 
@@ -3788,20 +4440,24 @@ class Plot(QtWidgets.QWidget):
             _item_cache = self._item_cache = {}
             _visible_entries = self._visible_entries = set()
             _visible_items = self._visible_items = {}
-            iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
 
-            while item := iterator.value():
-                iterator += 1
-                if item.type() == ChannelsTreeItem.Channel:
-                    _item_cache[item.uuid] = item
+            # Ueber ALLE Kanallisten laufen - sonst werden die Werte in den
+            # anderen Strips beim Cursorbewegen nicht mehr aktualisiert.
+            for tree in self.channel_lists():
+                iterator = QtWidgets.QTreeWidgetItemIterator(tree)
 
-                    if item.uuid == self.info_uuid or (
-                        item.exists
-                        and (item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked or item._is_visible)
-                    ):
-                        entry = (item.origin_uuid, item.signal.name, item.uuid)
-                        _visible_entries.add(entry)
-                        _visible_items[entry] = item
+                while item := iterator.value():
+                    iterator += 1
+                    if item.type() == ChannelsTreeItem.Channel:
+                        _item_cache[item.uuid] = item
+
+                        if item.uuid == self.info_uuid or (
+                            item.exists
+                            and (item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked or item._is_visible)
+                        ):
+                            entry = (item.origin_uuid, item.signal.name, item.uuid)
+                            _visible_entries.add(entry)
+                            _visible_items[entry] = item
 
             self.visible_entries_modified = True
 
@@ -3818,7 +4474,7 @@ class Plot(QtWidgets.QWidget):
         vb, x_range = args
 
         if self.info.isVisible():
-            stats = self.plot.get_stats(self.info_uuid)
+            stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
         if self.timebase_overview:
@@ -4221,6 +4877,10 @@ class PlotGraphics(pg.PlotWidget):
             elif not sig.empty:
                 sig.y_range = sig.min, sig.max
 
+            # erst ganz zum Schluss sperren, sonst greift der Bereich oben
+            # nicht mehr
+            sig.y_locked = description.get("y_locked", False)
+
             self.axes.append(self._axes_layout_pos)
             self._axes_layout_pos += 1
 
@@ -4579,8 +5239,16 @@ class PlotGraphics(pg.PlotWidget):
         return self._grid_pixmap
 
     def dropEvent(self, e):
-        if e.source() is self.plot_parent.channel_selection:
+        # Der Strip, auf den fallen gelassen wird, wird der aktive -
+        # sonst landen die Kanaele in irgendeinem anderen.
+        if self.plot_parent is not None and hasattr(self.plot_parent, "set_active_strip"):
+            self.plot_parent.set_active_strip(self)
+
+        own_list = getattr(self, "channel_list", None)
+        if own_list is not None and e.source() is own_list:
             super().dropEvent(e)
+        elif self._moved_from_other_strip(e):
+            e.accept()
         else:
             data = e.mimeData()
             if data.hasFormat("application/octet-stream-asammdf"):
@@ -4588,6 +5256,21 @@ class PlotGraphics(pg.PlotWidget):
                 self.add_channels_request.emit(names)
             else:
                 e.ignore()
+
+    def _moved_from_other_strip(self, e):
+        """Zug aus einem anderen Strip desselben Fensters: verschieben.
+
+        Liefert True, wenn der Umzug erledigt ist.
+        """
+        parent = self.plot_parent
+        if parent is None or not hasattr(parent, "move_signals_between_strips"):
+            return False
+
+        source = e.source()
+        if source not in parent.channel_lists():
+            return False
+
+        return parent.move_signals_between_strips(source, self)
 
     def edit_computation(self, item):
         signal = item.signal
@@ -6135,12 +6818,59 @@ class PlotGraphics(pg.PlotWidget):
 
         viewbox.setYRange(*[float(y) for y in sig.y_range], padding=0)
 
+        self._update_y_mouse()
+
         self.current_uuid_changed.emit(uuid)
         self.update()
 
     def set_dots(self, with_dots):
         self.with_dots = with_dots
         self.update()
+
+    def set_y_locked(self, uuid, state):
+        """Y-Bereich eines Signals festhalten.
+
+        Liegt das Signal auf der gemeinsamen Achse, gilt die Sperre fuer
+        alle Signale dieser Achse - sonst wuerden sie auseinanderlaufen.
+        Liefert die uuids, die tatsaechlich umgeschaltet wurden.
+        """
+        state = bool(state)
+
+        if uuid in self.common_axis_items:
+            uuids = list(self.common_axis_items)
+        else:
+            uuids = [uuid]
+
+        for item_uuid in uuids:
+            try:
+                sig, index = self.signal_by_uuid(item_uuid)
+            except KeyError:
+                continue
+
+            sig.y_locked = state
+
+            axis = self.get_axis(index)
+            if isinstance(axis, FormatedAxis):
+                axis.locked = state or self.locked
+
+        self._update_y_mouse()
+
+        return uuids
+
+    def _update_y_mouse(self):
+        """Y mit der Maus nur zulassen, wenn das aktuelle Signal frei ist."""
+        locked = self.locked
+
+        if not locked and self.current_uuid is not None:
+            try:
+                sig, _index = self.signal_by_uuid(self.current_uuid)
+            except KeyError:
+                sig = None
+            if sig is not None:
+                locked = sig.y_locked
+
+        self.y_axis.locked = locked
+        self.viewbox.setMouseEnabled(y=not locked)
 
     def set_individual_axis(self, uuid, state):
         sig, index = self.signal_by_uuid(uuid)
@@ -6166,11 +6896,14 @@ class PlotGraphics(pg.PlotWidget):
 
     def set_locked(self, locked):
         self.locked = locked
-        for axis in self.axes:
+        for index, axis in enumerate(self.axes):
             if isinstance(axis, FormatedAxis):
-                axis.locked = locked
+                # Eine Einzelsperre bleibt bestehen, auch wenn die
+                # Gesamtsperre aufgehoben wird.
+                own = index < len(self.signals) and self.signals[index].y_locked
+                axis.locked = locked or own
 
-        self.viewbox.setMouseEnabled(y=not self.locked)
+        self._update_y_mouse()
 
     def set_name(self, uuid, name):
         sig, index = self.signal_by_uuid(uuid)
