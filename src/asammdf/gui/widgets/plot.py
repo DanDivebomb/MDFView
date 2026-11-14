@@ -1861,7 +1861,29 @@ class Plot(QtWidgets.QWidget):
 
         self._prev_region = None
 
-        self.splitter.addWidget(self.plot)
+        # --- Strips -------------------------------------------------------
+        # Die Zeichenflaeche haengt nicht mehr direkt im Splitter, sondern in
+        # einem senkrechten Splitter, der spaeter mehrere Strips halten kann.
+        # self.plot zeigt immer auf den AKTIVEN Strip - dadurch bleiben die
+        # rund 180 bestehenden self.plot-Zugriffe unveraendert gueltig.
+        self.strips = [self.plot]
+        self._syncing_strip_cursor = False
+        if self.plot.cursor1 is not None:
+            self.plot.cursor_moved.connect(self._strip_cursor_moved)
+        self._strip_kwargs = {
+            "with_dots": with_dots,
+            "line_interconnect": self.line_interconnect,
+            "origin": origin,
+            "mdf": self.mdf,
+            "x_axis": x_axis,
+            "allow_cursor": allow_cursor,
+        }
+        self.strip_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.strip_splitter.setOpaqueResize(False)
+        self.strip_splitter.setHandleWidth(4)
+        self.strip_splitter.addWidget(self.plot)
+    
+        self.splitter.addWidget(self.strip_splitter)
 
         self.info = ChannelStats(
             self.x_unit,
@@ -2225,6 +2247,108 @@ class Plot(QtWidgets.QWidget):
         self.plot._can_paint = True
         self.plot.update()
 
+    # ------------------------------------------------------------------
+    # Strips (Subplots innerhalb dieses Fensters)
+    # ------------------------------------------------------------------
+    def add_strip(self, index=None):
+        """Einen weiteren Strip anlegen und zurueckgeben."""
+        plot = PlotGraphics(parent=self, plot_parent=self, **self._strip_kwargs)
+        plot.zoom_changed.connect(self.zoom_changed)
+        plot.bookmarks_changed.connect(self.bookmarks_changed)
+    
+        if index is None:
+            index = len(self.strips)
+    
+        if plot.cursor1 is not None:
+            plot.cursor_moved.connect(self._strip_cursor_moved)
+    
+        self.strips.insert(index, plot)
+        self.strip_splitter.insertWidget(index, plot)
+    
+        self._relink_strips()
+        plot._can_paint = True
+        return plot
+    
+    def remove_strip(self, strip):
+        """Einen Strip entfernen. Der letzte bleibt immer stehen."""
+        if len(self.strips) <= 1 or strip not in self.strips:
+            return False
+    
+        self.strips.remove(strip)
+        strip.setParent(None)
+        strip.close()
+    
+        if self.plot is strip:
+            self.set_active_strip(self.strips[0])
+    
+        self._relink_strips()
+        return True
+    
+    def move_strip(self, strip, offset):
+        """Strip nach oben (-1) oder unten (+1) schieben."""
+        if strip not in self.strips:
+            return False
+        old = self.strips.index(strip)
+        new = old + offset
+        if not 0 <= new < len(self.strips):
+            return False
+    
+        self.strips.insert(new, self.strips.pop(old))
+        self.strip_splitter.insertWidget(new, strip)
+        self._relink_strips()
+        return True
+    
+    def set_active_strip(self, strip):
+        """Legt fest, welcher Strip ab jetzt self.plot ist."""
+        if strip in self.strips:
+            self.plot = strip
+    
+    def _relink_strips(self):
+        """x-Achsen koppeln, Cursor koppeln, Zeitachse nur unten zeigen."""
+        master = self.strips[0].plotItem.vb
+    
+        for i, plot in enumerate(self.strips):
+            vb = plot.plotItem.vb
+            vb.setXLink(None)
+            if i:
+                vb.setXRange(*master.viewRange()[0], padding=0)
+                vb.setXLink(master)
+    
+            # Zeitachse nur beim untersten Strip
+            if i == len(self.strips) - 1:
+                plot.plotItem.showAxis("bottom")
+            else:
+                plot.plotItem.hideAxis("bottom")
+    
+    def strip_signal_by_uuid(self, uuid):
+        """(strip, signal, index) - sucht ueber ALLE Strips.
+        Die Kanalliste gehoert dem Fenster, die Signale liegen aber in den
+        einzelnen Strips. Ein Nachschlagen nur in self.plot findet Signale
+        aus anderen Strips nicht. Der Index gilt jeweils innerhalb des
+        zurueckgegebenen Strips - wer damit weiterarbeitet, muss diesen
+        Strip benutzen, nicht self.plot.
+        """
+        for strip in self.strips:
+            pair = strip._uuid_map.get(uuid)
+            if pair is not None:
+                return (strip, *pair)
+        raise KeyError(uuid)
+    
+    def _strip_cursor_moved(self, cursor):
+        """Cursorposition auf alle anderen Strips uebertragen."""
+        if self._syncing_strip_cursor:
+            return
+    
+        self._syncing_strip_cursor = True
+        try:
+            pos = cursor.value()
+            for plot in self.strips:
+                if plot.cursor1 is None or plot.cursor1 is cursor:
+                    continue
+                plot.cursor1.setPos(pos)
+                plot.cursor_move_finished.emit(plot.cursor1)
+        finally:
+            self._syncing_strip_cursor = False
     def adjust_splitter(self, initial=False):
         size = sum(self.splitter.sizes())
 
@@ -2403,7 +2527,11 @@ class Plot(QtWidgets.QWidget):
             enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
             if enabled != item.signal.enable:
                 item.signal.enable = enabled
-                self.plot.set_signal_enable(item.uuid, item.checkState(column))
+                try:
+                    strip, _sig, _idx = self.strip_signal_by_uuid(item.uuid)
+                except KeyError:
+                    return
+                strip.set_signal_enable(item.uuid, item.checkState(column))
             if not enabled and self.channel_selection.hide_disabled_channels:
                 item.setHidden(True)
 
@@ -2620,8 +2748,11 @@ class Plot(QtWidgets.QWidget):
 
             for item in self._visible_items.values():
                 if item.type() == item.Channel:
-                    signal, idx = self.plot.signal_by_uuid(item.uuid)
-                    index = self.plot.get_timestamp_index(position, signal.timestamps)
+                    try:
+                        strip, signal, _idx = self.strip_signal_by_uuid(item.uuid)
+                    except KeyError:
+                        continue
+                    index = strip.get_timestamp_index(position, signal.timestamps)
 
                     raw_value, raw_kind, value, kind, fmt = signal.value_at_index(index)
 
@@ -4405,6 +4536,8 @@ class PlotGraphics(pg.PlotWidget):
             _pixmap.fill(QtCore.Qt.transparent)
 
             paint = QtGui.QPainter()
+            if _pixmap.isNull():
+                    return
             paint.begin(_pixmap)
             paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
             paint.setRenderHints(paint.RenderHint.Antialiasing, False)
@@ -5448,6 +5581,8 @@ class PlotGraphics(pg.PlotWidget):
             _pixmap.fill(QtCore.Qt.transparent)
 
             paint = QtGui.QPainter()
+            if _pixmap.isNull():
+                return
             paint.begin(_pixmap)
             paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
             paint.setRenderHints(paint.RenderHint.Antialiasing, False)
