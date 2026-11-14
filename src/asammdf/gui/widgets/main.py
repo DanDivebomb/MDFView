@@ -26,6 +26,7 @@ from .batch import BatchWidget
 from .file import FileWidget
 from .mdi_area import get_functions, MdiAreaWidget, WithMDIArea
 from .plot import Plot
+from ..mdfview_theme import DARK_INDICATOR_STYLE
 
 
 class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
@@ -1310,7 +1311,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
             palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Highlight, brush)
             app.setPalette(palette)
-
+        app.setStyleSheet(DARK_INDICATOR_STYLE if option == "Dark" else "")
+            
     def set_line_interconnect(self, option):
         self._settings.setValue("plot/curve/line_interconnect", option)
 

@@ -4945,7 +4945,6 @@ class PlotGraphics(pg.PlotWidget):
 
                 common_min_ = np.nanmin([sig.min for sig in common_axis_signals])
                 common_max_ = np.nanmax([sig.max for sig in common_axis_signals])
-
             if count:
                 position = 0
                 common_axis_handled = False
