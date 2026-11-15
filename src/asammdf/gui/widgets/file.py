@@ -29,7 +29,7 @@ from ...blocks.v4_constants import (
     CompressionAlgorithm,
     FLAG_CG_BUS_EVENT,
 )
-from .. import serde
+from .. import mdfview_enums, serde
 from ..mdfview_paths import remember_folder, start_folder
 from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.channel_group_info import ChannelGroupInfoDialog
@@ -115,6 +115,24 @@ class Delegate(QtWidgets.QStyledItemDelegate):
 
     def setModelData(self, editor, model, index):
         return
+
+
+class BackgroundClick(QtCore.QObject):
+    """Meldet einen Mausklick auf die leere Flaeche hinter den Fenstern.
+
+    Ein Klick dorthin verschiebt den Tastaturfokus nicht, deshalb merkt
+    focusChanged davon nichts und die Kanalliste bliebe offen stehen.
+    """
+
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self.callback = callback
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            self.callback()
+
+        return False
 
 
 class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
@@ -301,15 +319,28 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
             self.channels_tree.setDragEnabled(True)
 
-            self.mdi_area = MdiAreaWidget()
+            # Mehrere Seiten fuer dieselbe Messdatei, jede mit eigenen
+            # Fenstern. self.mdi_area zeigt immer auf die sichtbare Seite.
+            self.page_tabs = QtWidgets.QTabWidget()
+            self.page_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.South)
+            self.page_tabs.setDocumentMode(True)
+            self.page_tabs.setMovable(True)
+            self.page_tabs.tabBarDoubleClicked.connect(self.rename_page)
 
-            self.mdi_area.add_window_request.connect(self.add_window)
-            self.mdi_area.create_window_request.connect(self._create_window)
-            self.mdi_area.search_request.connect(self.search)
-            self.mdi_area.open_files_request.connect(self.open_new_files.emit)
-            self.mdi_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.mdi_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.splitter.addWidget(self.mdi_area)
+            bar = self.page_tabs.tabBar()
+            bar.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            bar.customContextMenuRequested.connect(self.page_menu)
+
+            plus = QtWidgets.QToolButton()
+            plus.setText("+")
+            plus.setAutoRaise(True)
+            plus.setToolTip("New page")
+            plus.clicked.connect(lambda _checked=False: self.new_page())
+            self.page_tabs.setCornerWidget(plus, QtCore.Qt.Corner.BottomRightCorner)
+
+            self.splitter.addWidget(self.page_tabs)
+
+            self.new_page()
 
             self.channel_search_update_timer = QtCore.QTimer(self)
             self.channel_search_update_timer.setSingleShot(True)
@@ -437,6 +468,8 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             self.aspects.setCurrentIndex(0)
 
             self.aspects.currentChanged.connect(self.aspect_changed)
+
+            self.setup_channels_autohide()
 
         except:
             if progress:
@@ -1035,7 +1068,15 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         config["selected_channels"] = signals
 
         windows = list(self.unknown_windows)
-        for window in self.mdi_area.subWindowList():
+
+        # Alle Fenster saemtlicher Seiten, jedes mit der Nummer seiner Seite
+        on_pages = [
+            (page_index, window)
+            for page_index, area in enumerate(self.mdi_areas())
+            for window in area.subWindowList()
+        ]
+
+        for page_index, window in on_pages:
             wid = window.widget()
             wid_config = wid.to_config()
             if not wid_config:
@@ -1053,6 +1094,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 ],
                 "maximized": window.isMaximized() if not check_save else False,
                 "minimized": window.isMinimized() if not check_save else False,
+                "tab": page_index,
             }
             if isinstance(wid, Numeric):
                 window_config["type"] = "Numeric"
@@ -1081,6 +1123,10 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
         config["windows"] = windows
         config["active_window"] = current_window.windowTitle() if current_window else ""
+
+        # Seiten: Beschriftung und welche zuletzt sichtbar war
+        config["tabs"] = [self.page_tabs.tabText(index) for index in range(self.page_tabs.count())]
+        config["active_tab"] = self.page_tabs.currentIndex()
         config["functions"] = self.functions
         config["global_variables"] = "\n".join([line for line in self.global_variables.splitlines() if line])
 
@@ -1090,7 +1136,271 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         measurement_file = getattr(self.mdf, "original_name", None) or self.file_name
         config["measurement_file"] = str(measurement_file) if measurement_file else ""
 
+        # Eingestellte Farben der Enum-Eintraege. Sie haengen am Inhalt der
+        # Wertetabelle, gelten also fuer alle Kanaele mit derselben Enum.
+        enum_colors = mdfview_enums.to_config()
+        if enum_colors:
+            config["enum_colors"] = enum_colors
+
+        # Pinnadel und Breite der Kanalliste
+        if hasattr(self, "channels_pin"):
+            sizes = self.splitter.sizes()
+            width = (sizes[0] if sizes else 0) or self._channels_width
+
+            config["channels_pinned"] = bool(self.channels_pinned)
+            config["channels_width"] = int(width or 0)
+
         return config
+
+    # ------------------------------------------------------------------
+    # Seiten: mehrere Tabs mit Fenstern zur selben Messdatei
+    # ------------------------------------------------------------------
+    @property
+    def mdi_area(self):
+        """Fensterbereich der gerade sichtbaren Seite."""
+        tabs = getattr(self, "page_tabs", None)
+
+        return tabs.currentWidget() if tabs is not None else None
+
+    def mdi_areas(self):
+        """Alle Seiten, von links nach rechts."""
+        tabs = getattr(self, "page_tabs", None)
+        if tabs is None:
+            return []
+
+        return [tabs.widget(index) for index in range(tabs.count())]
+
+    def close_all_windows(self):
+        """Fenster aller Seiten abraeumen, etwa vor dem Neuladen der Messdatei.
+
+        Das muss ueber alle Seiten gehen: ein Fenster auf einer nicht
+        sichtbaren Seite haette sonst weiter Signale einer geschlossenen
+        Datei in der Hand.
+        """
+        for area in self.mdi_areas():
+            for window in list(area.subWindowList()):
+                widget = window.widget()
+
+                area.removeSubWindow(window)
+                widget.setParent(None)
+                widget.close()
+                widget.deleteLater()
+                window.close()
+
+    def new_page(self, name=""):
+        """Eine weitere Seite anlegen und gleich zeigen."""
+        area = MdiAreaWidget()
+
+        area.add_window_request.connect(self.add_window)
+        area.create_window_request.connect(self._create_window)
+        area.search_request.connect(self.search)
+        area.open_files_request.connect(self.open_new_files.emit)
+        area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Klick auf den leeren Hintergrund klappt die Kanalliste zu
+        background = getattr(self, "background_click", None)
+        if background is not None:
+            area.viewport().installEventFilter(background)
+            area.installEventFilter(background)
+
+        index = self.page_tabs.addTab(area, name or f"Page {self.page_tabs.count() + 1}")
+        self.page_tabs.setCurrentIndex(index)
+
+        return area
+
+    def setup_pages(self, names):
+        """Seiten einer Konfiguration herstellen: Anzahl und Beschriftung."""
+        names = [str(name) for name in (names or []) if str(name).strip()] or ["Page 1"]
+
+        while self.page_tabs.count() > len(names):
+            area = self.page_tabs.widget(self.page_tabs.count() - 1)
+            self.page_tabs.removeTab(self.page_tabs.count() - 1)
+            area.setParent(None)
+            area.deleteLater()
+
+        while self.page_tabs.count() < len(names):
+            self.new_page()
+
+        for index, name in enumerate(names):
+            self.page_tabs.setTabText(index, name)
+
+    def rename_page(self, index):
+        if index < 0:
+            return
+
+        name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Rename page",
+            "Page name:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+            self.page_tabs.tabText(index),
+        )
+
+        if ok and name.strip():
+            self.page_tabs.setTabText(index, name.strip())
+
+    def delete_page(self, index):
+        """Seite mitsamt ihren Fenstern entfernen - die letzte bleibt."""
+        if index < 0 or self.page_tabs.count() < 2:
+            return
+
+        area = self.page_tabs.widget(index)
+        open_windows = len(area.subWindowList())
+
+        if open_windows:
+            answer = MessageBox.question(
+                self,
+                "Delete page",
+                f"Delete the page '{self.page_tabs.tabText(index)}' and its {open_windows} window(s)?",
+            )
+
+            if answer != MessageBox.Yes:
+                return
+
+        self.page_tabs.removeTab(index)
+        area.clear_windows()
+        area.setParent(None)
+        area.deleteLater()
+
+    def page_menu(self, pos):
+        bar = self.page_tabs.tabBar()
+        index = bar.tabAt(pos)
+
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("New page")
+
+        if index >= 0:
+            menu.addAction("Rename page")
+            if self.page_tabs.count() > 1:
+                menu.addAction("Delete page")
+
+        action = menu.exec(bar.mapToGlobal(pos))
+        if action is None:
+            return
+
+        if action.text() == "New page":
+            self.new_page()
+        elif action.text() == "Rename page":
+            self.rename_page(index)
+        elif action.text() == "Delete page":
+            self.delete_page(index)
+
+    # ------------------------------------------------------------------
+    # Kanalliste wegklappen
+    # ------------------------------------------------------------------
+    def setup_channels_autohide(self):
+        """Kanalliste bei Bedarf einklappen, um Platz zu gewinnen.
+
+        Die Reiter stehen ohnehin senkrecht am linken Rand. Eingeklappt
+        bleibt nur diese Leiste stehen; ein Klick auf "Channels" holt die
+        Liste zurueck, ein Klick ins Fenster rechts laesst sie wieder
+        verschwinden. Die Pinnadel haelt sie dauerhaft offen.
+        """
+        self.channels_pinned = True
+        self._channels_width = 0
+
+        button = QtWidgets.QToolButton(self.verticalLayoutWidget)
+        button.setCheckable(True)
+        button.setChecked(True)
+        button.setText("\U0001f4cc")
+        button.setToolTip("Keep the channel list open")
+        button.setAutoRaise(True)
+        button.toggled.connect(self.set_channels_pinned)
+
+        self.channels_pin = button
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(1)
+        row.addStretch()
+        row.addWidget(button)
+
+        self.channels_layout.insertLayout(0, row)
+
+        self.aspects.tabBarClicked.connect(self.aspect_tab_clicked)
+
+        # Klick auf den leeren Hintergrund zwischen den Fenstern
+        self.background_click = BackgroundClick(self.collapse_channels, self)
+        for area in self.mdi_areas():
+            area.viewport().installEventFilter(self.background_click)
+            area.installEventFilter(self.background_click)
+
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            application.focusChanged.connect(self.channels_focus_changed)
+
+    def set_channels_pinned(self, pinned):
+        self.channels_pinned = bool(pinned)
+
+        self.channels_pin.setToolTip(
+            "Keep the channel list open" if pinned else "Hide the channel list when it is not in use"
+        )
+
+        if pinned:
+            self.expand_channels()
+        else:
+            self.collapse_channels()
+
+    def collapse_channels(self):
+        if self.channels_pinned:
+            return
+
+        sizes = self.splitter.sizes()
+        if len(sizes) < 2 or not sizes[0]:
+            return
+
+        self._channels_width = sizes[0]
+        self.splitter.setSizes([0, sum(sizes)])
+
+    def expand_channels(self):
+        sizes = self.splitter.sizes()
+        if len(sizes) < 2:
+            return
+
+        total = sum(sizes)
+        width = self._channels_width or 320
+        self.splitter.setSizes([width, max(total - width, 100)])
+
+    def restore_channels_state(self, info):
+        """Pinnadel und Breite der Kanalliste aus der Konfiguration."""
+        if not hasattr(self, "channels_pin"):
+            return
+
+        width = int(info.get("channels_width") or 0)
+        if width > 0:
+            self._channels_width = width
+
+        pinned = info.get("channels_pinned")
+        if pinned is None:
+            # alte Konfiguration ohne diesen Eintrag: nichts umstellen
+            return
+
+        pinned = bool(pinned)
+
+        # setChecked meldet sich nur bei einer Aenderung, der Aufruf
+        # danach bringt auch den unveraenderten Fall auf Stand
+        self.channels_pin.setChecked(pinned)
+        self.set_channels_pinned(pinned)
+
+    def aspect_tab_clicked(self, index):
+        if self.aspects.tabText(index) == "Channels":
+            self.expand_channels()
+
+    def channels_focus_changed(self, old, new):
+        """Klick irgendwo ausserhalb der Liste: wieder einklappen."""
+        if self.channels_pinned or new is None or not self.isVisible():
+            return
+
+        allowed = (self.verticalLayoutWidget, self.aspects.tabBar(), self.channels_pin)
+
+        widget = new
+        while widget is not None:
+            if widget in allowed:
+                return
+            widget = widget.parentWidget()
+
+        self.collapse_channels()
 
     def save_channel_list(self, event=None, file_name=None):
         if file_name is None:
@@ -1291,15 +1601,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
                         self.mdf.close()
 
-                        windows = list(self.mdi_area.subWindowList())
-                        for window in windows:
-                            widget = window.widget()
-
-                            self.mdi_area.removeSubWindow(window)
-                            widget.setParent(None)
-                            widget.close()
-                            widget.deleteLater()
-                            window.close()
+                        self.close_all_windows()
 
                         suffix = original_file_name.suffix.lower()
                         if suffix == ".mf4z":
@@ -1408,6 +1710,10 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         self.clear_windows()
 
         if extension in (".dspf", ".dsp", ".dict"):
+            # vor den Fenstern, damit gleich in den richtigen Farben gezeichnet wird
+            mdfview_enums.from_config(info.get("enum_colors"))
+            self.restore_channels_state(info)
+
             new_global_vars = "\n".join(
                 line.strip() for line in info.get("global_variables", "").splitlines() if line.strip()
             )
@@ -1456,6 +1762,17 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
         windows = info.get("windows", [])
         errors = {}
+
+        # Seiten herstellen, bevor die Fenster kommen. Alte
+        # Konfigurationen ohne Seiten bekommen eine einzige.
+        if extension in (".dspf", ".dsp", ".dict"):
+            pages = info.get("tabs") or []
+            if not pages:
+                highest = max((int(window.get("tab", 0) or 0) for window in windows), default=0)
+                pages = [f"Page {number + 1}" for number in range(highest + 1)]
+
+            self.setup_pages(pages)
+
         if windows:
             count = len(windows)
 
@@ -1478,6 +1795,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 if progress:
                     progress.setLabelText(f"Loading {window_type} window <{window_title}>")
                     QtWidgets.QApplication.processEvents()
+
+                # Das Fenster entsteht immer auf der sichtbaren Seite,
+                # also vorher auf die richtige umschalten.
+                page = int(window.get("tab", 0) or 0)
+                if 0 <= page < self.page_tabs.count():
+                    self.page_tabs.setCurrentIndex(page)
+
                 try:
                     self.load_window(window)
                     if progress:
@@ -1489,11 +1813,16 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             if progress:
                 progress.cancel()
 
+            active_tab = int(info.get("active_tab", 0) or 0)
+            if 0 <= active_tab < self.page_tabs.count():
+                self.page_tabs.setCurrentIndex(active_tab)
+
             active_window = info.get("active_window", "")
-            for window in self.mdi_area.subWindowList():
-                if window.windowTitle() == active_window:
-                    self.mdi_area.setActiveSubWindow(window)
-                    break
+            for area in self.mdi_areas():
+                for window in area.subWindowList():
+                    if window.windowTitle() == active_window:
+                        area.setActiveSubWindow(window)
+                        break
 
         worker = md5()
         worker.update(
@@ -1760,7 +2089,7 @@ MultiRasterSeparator;&
     def close(self):
         if get_global_option("check_unsaved_display_file"):
             hexdigest = self._previous_window_config
-            windows = self.mdi_area.subWindowList()
+            windows = self.all_sub_windows()
 
             if windows:
                 unsaved = False
@@ -3118,14 +3447,7 @@ MultiRasterSeparator;&
                 _password = self.mdf._mdf._password
                 self.mdf.close()
 
-                windows = list(self.mdi_area.subWindowList())
-                for window in windows:
-                    widget = window.widget()
-                    self.mdi_area.removeSubWindow(window)
-                    widget.setParent(None)
-                    widget.close()
-                    widget.deleteLater()
-                    window.close()
+                self.close_all_windows()
 
             mdf.save(
                 dst=file_name,
@@ -3274,15 +3596,7 @@ MultiRasterSeparator;&
 
         self.mdf.close()
 
-        windows = list(self.mdi_area.subWindowList())
-        for window in windows:
-            widget = window.widget()
-
-            self.mdi_area.removeSubWindow(window)
-            widget.setParent(None)
-            widget.close()
-            widget.deleteLater()
-            window.close()
+        self.close_all_windows()
 
         suffix = original_file_name.suffix.lower()
         if suffix == ".mf4z":
@@ -3642,7 +3956,7 @@ MultiRasterSeparator;&
             self.load_embedded_channel_list_btn.setDisabled(True)
 
     def finalize_init(self):
-        if self.mdi_area.subWindowList():
+        if self.all_sub_windows():
             worker = md5()
             worker.update(
                 json.dumps(self.to_config(check_save=True), indent=2, cls=ExtendedJsonEncoder).encode(

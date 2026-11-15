@@ -18,6 +18,7 @@ from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.conversion_editor import ConversionEditor
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.range_editor import RangeEditor
+from ..mdfview_enums import conversion_of, enum_table, EnumColorsDialog, set_colors
 from ..serde import ExtendedJsonDecoder, ExtendedJsonEncoder, extract_mime_names
 from ..utils import (
     copy_ranges,
@@ -1293,6 +1294,9 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         submenu.addAction("Set channel conversion")
         submenu.addAction("Set channel comment")
         submenu.addAction("Set unit")
+        # nur sinnvoll, wenn der Kanal ueberhaupt eine Wertetabelle hat
+        if item and item.type() == ChannelsTreeItem.Channel and enum_table(conversion_of(item.signal))[1]:
+            submenu.addAction("Set enum colors")
         if item:
             if item.type() == ChannelsTreeItem.Channel:
                 if item.signal.flags & Signal.Flags.computed:
@@ -1640,6 +1644,23 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             window = self.plot
             if hasattr(window, "move_selection_to_new_strip"):
                 window.move_selection_to_new_strip(self, -1 if action_text.endswith("above") else 1)
+
+        elif action_text == "Set enum colors":
+            # Die Farben haengen an der Wertetabelle, nicht am Kanal - der
+            # erste markierte Kanal mit Tabelle bestimmt, welche gemeint ist.
+            for candidate in self.selectedItems():
+                if candidate.type() != ChannelsTreeItem.Channel:
+                    continue
+
+                key, rows = enum_table(conversion_of(candidate.signal))
+                if not rows:
+                    continue
+
+                dialog = EnumColorsDialog(candidate.name, key, rows, parent=self)
+                if dialog.exec():
+                    set_colors(key, dialog.chosen_colors())
+
+                break
 
         elif action_text == "Set precision":
             selected_items = self.selectedItems()
@@ -2328,8 +2349,12 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.uuid = uuid
             self.origin_uuid = origin_uuid
 
-        self.setTextAlignment(self.RawColumn, QtCore.Qt.AlignmentFlag.AlignRight)
-        self.setTextAlignment(self.ValueColumn, QtCore.Qt.AlignmentFlag.AlignRight)
+        # Linksbuendig und mittig - ohne senkrechte Angabe klebt der Text
+        # am oberen Rand, was bei hohen Zeilen (Digital- und Enumfenster)
+        # neben dem Namen verrutscht aussieht.
+        alignment = QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        self.setTextAlignment(self.RawColumn, alignment)
+        self.setTextAlignment(self.ValueColumn, alignment)
         self.setText(self.OriginColumn, self.origin_uuid)
 
     def __repr__(self):

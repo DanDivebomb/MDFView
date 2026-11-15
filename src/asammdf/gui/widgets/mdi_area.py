@@ -3175,7 +3175,6 @@ class WithMDIArea:
             plot.cursor_moved_signal.connect(self.set_cursor)
             plot.region_removed_signal.connect(self.remove_region)
             plot.region_moved_signal.connect(self.set_region)
-            plot.splitter_moved.connect(self.set_splitter)
 
             for i, mdi in enumerate(self.mdi_area.subWindowList()):
                 widget = mdi.widget()
@@ -3394,7 +3393,7 @@ class WithMDIArea:
         if self.comparison:
             return
 
-        windows = list(self.mdi_area.subWindowList())
+        windows = list(self.all_sub_windows())
         for window in windows:
             widget = window.widget()
             if widget is plot:
@@ -3405,18 +3404,34 @@ class WithMDIArea:
                 widget.bookmarks = bookmarks
                 widget.blockSignals(False)
 
+    def mdi_areas(self):
+        """Alle Fensterbereiche. Ohne Seiten ist es genau einer."""
+        area = getattr(self, "mdi_area", None)
+
+        return [area] if area is not None else []
+
+    def all_sub_windows(self):
+        """Fenster aller Seiten in einer Liste.
+
+        Fuer alles, was die ganze Messdatei betrifft - Einstellungen,
+        Funktionen, Lesezeichen. Was nur die sichtbare Anordnung angeht
+        (Cursor, Bereich, Kacheln), bleibt bei self.mdi_area.
+        """
+        return [window for area in self.mdi_areas() for window in area.subWindowList()]
+
     def clear_windows(self, is_closing=False):
         bookmarks_handled = False
-        for mdi in self.mdi_area.subWindowList():
-            wid = mdi.widget()
-            if isinstance(wid, Plot):
-                if not bookmarks_handled:
-                    self.verify_bookmarks(wid, is_closing=is_closing)
-                    bookmarks_handled = True
+        for area in self.mdi_areas():
+            for mdi in area.subWindowList():
+                wid = mdi.widget()
+                if isinstance(wid, Plot):
+                    if not bookmarks_handled:
+                        self.verify_bookmarks(wid, is_closing=is_closing)
+                        bookmarks_handled = True
 
-            wid.blockSignals(True)
+                wid.blockSignals(True)
 
-        self.mdi_area.clear_windows()
+            area.clear_windows()
 
     def delete_functions(self, deleted_functions):
         deleted = set()
@@ -3424,7 +3439,7 @@ class WithMDIArea:
             del self.functions[info["name"]]
             deleted.add(info["name"])
 
-        for mdi in self.mdi_area.subWindowList():
+        for mdi in self.all_sub_windows():
             wid = mdi.widget()
             if isinstance(wid, Plot):
                 iterator = QtWidgets.QTreeWidgetItemIterator(wid.channel_selection)
@@ -4224,6 +4239,7 @@ class WithMDIArea:
         # Anzahl braucht Plot zusaetzlich, falls der letzte Strip leer ist.
         plot._pending_strip_count = window_info["configuration"].get("strip_count", 0)
         plot._pending_strip_digital = window_info["configuration"].get("strip_digital", [])
+        plot._pending_strip_modes = window_info["configuration"].get("strip_modes", [])
 
         plot.add_new_channels(signals, mime_data)
 
@@ -4240,7 +4256,6 @@ class WithMDIArea:
             plot.cursor_moved_signal.connect(self.set_cursor)
             plot.region_removed_signal.connect(self.remove_region)
             plot.region_moved_signal.connect(self.set_region)
-            plot.splitter_moved.connect(self.set_splitter)
 
             for i, mdi in enumerate(self.mdi_area.subWindowList()):
                 widget = mdi.widget()
@@ -4627,7 +4642,7 @@ class WithMDIArea:
             line_interconnect = ""
 
         self.line_interconnect = line_interconnect
-        for i, mdi in enumerate(self.mdi_area.subWindowList()):
+        for i, mdi in enumerate(self.all_sub_windows()):
             widget = mdi.widget()
             if isinstance(widget, Plot):
                 widget.line_interconnect = line_interconnect
@@ -4639,18 +4654,17 @@ class WithMDIArea:
     def set_subplots_link(self, subplots_link):
         self.subplots_link = subplots_link
         if subplots_link:
-            for i, mdi in enumerate(self.mdi_area.subWindowList()):
+            for i, mdi in enumerate(self.all_sub_windows()):
                 widget = mdi.widget()
                 if isinstance(widget, Plot):
                     widget.x_range_changed_signal.connect(self.set_x_range)
                     widget.cursor_moved_signal.connect(self.set_cursor)
                     widget.region_removed_signal.connect(self.remove_region)
                     widget.region_moved_signal.connect(self.set_region)
-                    widget.splitter_moved.connect(self.set_splitter)
                 elif widget:
                     widget.timestamp_changed_signal.connect(self.set_cursor)
         else:
-            for mdi in self.mdi_area.subWindowList():
+            for mdi in self.all_sub_windows():
                 widget = mdi.widget()
                 if isinstance(widget, Plot):
                     try:
@@ -4783,6 +4797,10 @@ class WithMDIArea:
         self._busy = False
 
     def set_splitter(self, widget, selection_width):
+        # Wird nicht mehr verbunden: die Breite der Kanalspalte gehoert
+        # zum einzelnen Plotfenster und steht je Fenster in der
+        # Konfiguration. "Link sub-windows" koppelt nur noch Zeitachse,
+        # Cursor und Bereich.
         if self._busy:
             return
         else:
@@ -4858,7 +4876,7 @@ class WithMDIArea:
 
         # apply changes
 
-        for mdi in self.mdi_area.subWindowList():
+        for mdi in self.all_sub_windows():
             wid = mdi.widget()
             if isinstance(wid, Plot):
                 iterator = QtWidgets.QTreeWidgetItemIterator(wid.channel_selection)
@@ -5162,7 +5180,7 @@ class WithMDIArea:
 
             self.aspects.setCurrentIndex(0)
 
-            windows = list(self.mdi_area.subWindowList())
+            windows = list(self.all_sub_windows())
             for window in windows:
                 window.blockSignals(True)
                 widget = window.widget()
@@ -5183,7 +5201,7 @@ class WithMDIArea:
         self.windows_modified.emit()
 
     def window_pattern_modified(self, pattern, window_id):
-        for window in self.mdi_area.subWindowList():
+        for window in self.all_sub_windows():
             if id(window) == window_id:
                 wid = window.widget()
                 wid.pattern = pattern
@@ -5221,7 +5239,7 @@ class WithMDIArea:
         self.cursor_line_width = cursor_line_width
         self.cursor_color = cursor_color
 
-        for i, mdi in enumerate(self.mdi_area.subWindowList()):
+        for i, mdi in enumerate(self.all_sub_windows()):
             widget = mdi.widget()
             if isinstance(widget, Plot):
                 widget.plot.cursor1.show_circle = cursor_circle

@@ -38,6 +38,8 @@ class FormatedAxis(pg.AxisItem):
         self.text_conversion = None
         self._enumeration_cache = (None, [])
         self._on_width_handle = False
+        self._width_at_press = None
+        self._width_drag = False
         self.origin = None
 
         self.hovering = False
@@ -47,31 +49,47 @@ class FormatedAxis(pg.AxisItem):
         self.locked = kwargs.pop("locked", False)
 
         if self.orientation in ("left", "right"):
-            self.plus = ButtonItem(":/plus.png", BUTTON_SIZE, parentItem=self)
-            self.minus = ButtonItem(":/minus.png", BUTTON_SIZE, parentItem=self)
-
-            self.plus.clicked.connect(self.increase_width)
-            self.minus.clicked.connect(self.decrease_width)
-
-            if self.scene() is not None:
-                self.scene().addItem(self.plus)
-                self.scene().addItem(self.minus)
-
+            # Die Knoepfe + und - entfallen: die Breite zieht man am
+            # inneren Rand der Skala. Die Felder bleiben auf None, damit
+            # der restliche Code sie weiter abfragen kann.
             self.setWidth(48)
 
         self.set_pen(self._pen)
 
     def increase_width(self):
-        self.setWidth(self.width() + 10)
+        self.setWidth(self.tick_width() + 10)
 
     def decrease_width(self):
-        self.setWidth(self.width() - 10)
+        self.setWidth(self.tick_width() - 10)
 
     def setWidth(self, w=None):
         if self.orientation in ("left", "right"):
             super().setWidth(max(w, 48))
         else:
             super().setWidth(w)
+
+    def tick_width(self):
+        """Eingestellte Breite der Skala, ohne die Achsenbeschriftung."""
+        return self.fixedWidth if self.fixedWidth is not None else self.width()
+
+    def _updateWidth(self):
+        """Auch bei fester Breite Platz fuer die Achsenbeschriftung lassen.
+
+        pyqtgraph rechnet die Dicke der Beschriftung nur dann dazu, wenn
+        es die Breite selbst bestimmt. Sobald sie festliegt - also sobald
+        man sie einmal mit der Maus gezogen hat - stand die Beschriftung
+        sonst mitten in den Zahlen.
+        """
+        super()._updateWidth()
+
+        if self.fixedWidth is None or not self.isVisible() or not self.label.isVisible():
+            return
+
+        width = self.fixedWidth + int(self.label.boundingRect().height() * 0.8)
+
+        self.setMaximumWidth(width)
+        self.setMinimumWidth(width)
+        self.picture = None
 
     def enumeration_values(self):
         """Die in der Umrechnungstabelle hinterlegten Rohwerte.
@@ -277,18 +295,36 @@ class FormatedAxis(pg.AxisItem):
     def mouseDragEvent(self, event):
         # Am inneren Rand zieht die Maus die Breite der Skala - auch bei
         # gesperrter Achse, denn das ist reine Darstellung.
-        if self.orientation in ("left", "right") and event.button() == QtCore.Qt.MouseButton.LeftButton:
-            if self.on_width_handle(event.buttonDownPos()):
-                event.accept()
+        # Ob am Rand gezogen wird, entscheidet sich EINMAL beim Druecken.
+        # Frueher wurde das bei jedem Ereignis neu geprueft - sobald die
+        # Skala breiter war als der Druckpunkt, galt sie nicht mehr als
+        # getroffen und das Ziehen endete. Genau daher die Grenze.
+        if event.isStart():
+            self._width_drag = (
+                self.orientation in ("left", "right")
+                and event.button() == QtCore.Qt.MouseButton.LeftButton
+                and self.on_width_handle(event.buttonDownPos())
+            )
+            # Die Breite der Skala, nicht die sichtbare Gesamtbreite:
+            # sonst kaeme bei jedem Ziehen die Beschriftung noch dazu.
+            self._width_at_press = self.tick_width()
 
-                delta = event.pos().x() - event.lastPos().x()
-                if self.orientation == "right":
-                    delta = -delta
+        if self._width_drag:
+            event.accept()
 
-                self.setWidth(int(self.width() + delta))
-                self.picture = None
-                self.update()
-                return
+            offset = event.pos().x() - event.buttonDownPos().x()
+            if self.orientation == "right":
+                offset = -offset
+
+            self.setWidth(int(self._width_at_press + offset))
+            self.picture = None
+            self.update()
+
+            if event.isFinish():
+                self._width_drag = False
+                self._width_at_press = None
+
+            return
 
         if self.locked:
             return

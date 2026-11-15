@@ -121,6 +121,7 @@ import asammdf.mdf as mdf_module
 from ...signal import Signal
 from .. import serde
 from ..dialogs.define_channel import DefineChannel
+from ..mdfview_enums import conversion_of, enum_entries, value_color, value_label
 from ..serde import extract_mime_names
 from ..utils import copy_ranges
 from .channel_stats import ChannelStats
@@ -134,6 +135,18 @@ bin_ = bin
 HERE = Path(__file__).resolve().parent
 
 NOT_FOUND = 0xFFFFFFFF
+
+
+def second_cursor_color(color):
+    """Farbe des zweiten Bereichscursors, deutlich vom ersten getrennt."""
+    base = fn.mkColor(color)
+    hue, saturation, value, _alpha = base.getHsv()
+
+    if hue < 0:
+        # grau oder weiss: fester Gegenwert
+        return "#00b0ff"
+
+    return QtGui.QColor.fromHsv((hue + 150) % 360, max(saturation, 180), max(value, 200)).name()
 HONEYWELL_SECONDS_PER_CM = 0.1
 
 float64 = np.float64
@@ -1881,6 +1894,7 @@ class Plot(QtWidgets.QWidget):
         self.plot.viewport().installEventFilter(self)
         self._syncing_strip_cursor = False
         self._syncing_strip_heights = False
+        self._syncing_strip_region = False
         self._drop_choice_strip = None
         self._drop_choice_before = set()
         self._drop_choice_offset = 0
@@ -1910,6 +1924,7 @@ class Plot(QtWidgets.QWidget):
         self.strip_splitter.setHandleWidth(4)
         self.strip_splitter.addWidget(self.plot)
         self._register_strip(self.plot, self.channel_selection)
+        self._wire_strip_region(self.plot)
         self.list_splitter.addWidget(self.plot.list_panel)
 
         self.splitter.addWidget(self.strip_splitter)
@@ -2296,6 +2311,8 @@ class Plot(QtWidgets.QWidget):
         if index is None:
             index = len(self.strips)
 
+        self._wire_strip_region(plot)
+
         if plot.cursor1 is not None:
             # Aussehen des Cursors wie im ersten Strip
             for name, value in getattr(self, "_strip_cursor_style", {}).items():
@@ -2653,11 +2670,18 @@ class Plot(QtWidgets.QWidget):
         for strip in self.strips:
             self._restore_strip_state(strip, descriptions)
 
+        modes = getattr(self, "_pending_strip_modes", None) or []
         digital = getattr(self, "_pending_strip_digital", None) or []
+        self._pending_strip_modes = []
         self._pending_strip_digital = []
-        for index, state in enumerate(digital):
-            if state and index < len(self.strips):
-                self.set_digital_mode(self.strips[index], True)
+
+        if not modes:
+            # aeltere Konfigurationen kennen nur digital ja/nein
+            modes = ["digital" if state else "analog" for state in digital]
+
+        for index, mode in enumerate(modes):
+            if index < len(self.strips) and mode != "analog":
+                self.set_window_mode(self.strips[index], mode)
 
         self.set_active_strip(self.strips[0])
         self._equalize_strips()
@@ -2780,6 +2804,11 @@ class Plot(QtWidgets.QWidget):
         tree.viewport().installEventFilter(self)
         plot.list_panel = self._build_list_panel(plot, tree)
 
+        # Hoehe der Zeichenflaeche und Rollstand der Liste bestimmen, wo
+        # die Signalzeilen liegen - beides kann sich jederzeit aendern.
+        plot.viewbox.sigResized.connect(partial(self.schedule_strip_layout, plot))
+        tree.verticalScrollBar().valueChanged.connect(partial(self.schedule_strip_layout, plot))
+
     def _build_list_panel(self, plot, tree):
         """Kanalliste mit eigener Knopfreihe darueber.
 
@@ -2901,10 +2930,12 @@ class Plot(QtWidgets.QWidget):
         menu._strip_toggles = toggles
 
         menu.addSeparator()
-        # Beschriftung wechselt je nach Zustand - siehe aboutToShow.
-        menu._strip_digital_action = menu.addAction(
-            "Digital window", lambda: self.toggle_digital_mode(plot)
-        )
+        window_type = menu.addMenu("Window type")
+        menu._strip_mode_actions = {}
+        for mode, text in (("analog", "Analog"), ("digital", "Digital"), ("enum", "Enum")):
+            action = window_type.addAction(text, partial(self.set_window_mode, plot, mode))
+            action.setCheckable(True)
+            menu._strip_mode_actions[mode] = action
 
         # Die Strip-Befehle stehen im Rechtsklickmenue der Zeichenflaeche.
 
@@ -2931,9 +2962,11 @@ class Plot(QtWidgets.QWidget):
             action.setChecked(state[name])
             action.blockSignals(False)
 
-        action = getattr(menu, "_strip_digital_action", None)
-        if action is not None:
-            action.setText("Analog window" if getattr(plot, "digital_mode", False) else "Digital window")
+        current = self.window_mode(plot)
+        for mode, action in getattr(menu, "_strip_mode_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(mode == current)
+            action.blockSignals(False)
 
         undo, redo = getattr(menu, "_strip_zoom_actions", (None, None))
         has_history = self.enable_zoom_history and hasattr(self, "undo_btn")
@@ -2990,6 +3023,30 @@ class Plot(QtWidgets.QWidget):
 
         return True
 
+    def window_mode(self, plot):
+        """Fenstertyp eines Strips: analog, digital oder enum."""
+        if not getattr(plot, "digital_mode", False):
+            return "analog"
+
+        return "enum" if getattr(plot, "enum_mode", False) else "digital"
+
+    def set_window_mode(self, plot, mode):
+        """Zwischen analoger, digitaler und Enum-Darstellung wechseln."""
+        if mode not in ("analog", "digital", "enum"):
+            return
+
+        plot.enum_mode = mode == "enum"
+
+        stacked = mode in ("digital", "enum")
+
+        if getattr(plot, "digital_mode", False) != stacked:
+            self.set_digital_mode(plot, stacked)
+        else:
+            # gleiche Anordnung, nur andere Zeichenart
+            self.layout_digital_strip(plot)
+            self._number_strips()
+            plot.update()
+
     def toggle_digital_mode(self, plot):
         self.set_digital_mode(plot, not getattr(plot, "digital_mode", False))
 
@@ -3023,6 +3080,7 @@ class Plot(QtWidgets.QWidget):
             plot.viewbox.setMouseEnabled(y=False)
             self.layout_digital_strip(plot)
         else:
+            self._reset_list_rows(plot)
             plot.set_line_interconnect(getattr(plot, "_analog_line_interconnect", ""))
 
             if not self.hide_axes_btn.isFlat():
@@ -3113,14 +3171,14 @@ class Plot(QtWidgets.QWidget):
         if tree is None:
             return
 
-        uuids = []
+        rows = []
         iterator = QtWidgets.QTreeWidgetItemIterator(tree)
         while item := iterator.value():
             iterator += 1
             if item.type() == ChannelsTreeItem.Channel and item.signal.enable:
-                uuids.append(item.uuid)
+                rows.append((item.uuid, item))
 
-        count = len(uuids)
+        count = len(rows)
         if not count:
             return
 
@@ -3130,7 +3188,7 @@ class Plot(QtWidgets.QWidget):
         # Der erste Eintrag der Liste gehoert nach oben, also von unten
         # her durchzaehlen.
         bands = {}
-        for position, uuid in enumerate(reversed(uuids)):
+        for position, (uuid, _item) in enumerate(reversed(rows)):
             try:
                 signal, _index = plot.signal_by_uuid(uuid)
             except KeyError:
@@ -3149,13 +3207,20 @@ class Plot(QtWidgets.QWidget):
             bottom = minimum - (dim - span) / 2
             top = bottom + dim * count
 
-            bands[uuid] = (bottom - dim * position, top - dim * position)
+            # Neben dem Wertebereich auch die Zeile selbst merken. Die
+            # Enum-Balken fuellen sie ganz aus, auch wenn das Signal nur
+            # einen einzigen Wert hat.
+            bands[uuid] = ((bottom - dim * position, top - dim * position), (minimum, maximum))
 
         if not bands:
             return
 
+        # Wenn moeglich, jedes Signal auf die Hoehe seines Eintrags in der
+        # Kanalliste legen statt die Hoehe gleichmaessig aufzuteilen.
+        self._align_bands_to_list(plot, rows, bands)
+
         def apply_bands():
-            for uuid, y_range in bands.items():
+            for uuid, (y_range, lane) in bands.items():
                 try:
                     signal, _index = plot.signal_by_uuid(uuid)
                 except KeyError:
@@ -3165,6 +3230,7 @@ class Plot(QtWidgets.QWidget):
                 signal.y_locked = False
                 signal.y_range = y_range
                 signal.y_locked = was_locked
+                signal.enum_band = lane
 
         apply_bands()
 
@@ -3174,7 +3240,7 @@ class Plot(QtWidgets.QWidget):
             plot.y_axis.blockSignals(True)
             plot.viewbox.blockSignals(True)
             try:
-                plot.viewbox.setYRange(*bands[plot.current_uuid], padding=0)
+                plot.viewbox.setYRange(*bands[plot.current_uuid][0], padding=0)
             finally:
                 plot.viewbox.blockSignals(False)
                 plot.y_axis.blockSignals(False)
@@ -3183,6 +3249,110 @@ class Plot(QtWidgets.QWidget):
         apply_bands()
 
         plot.update()
+
+    def _align_bands_to_list(self, plot, rows, bands):
+        """Die ganze Hoehe gleichmaessig aufteilen - Zeichenflaeche und Liste.
+
+        Bei Enums sagt die Farbe nichts ueber den Kanal, sie gehoert zum
+        Wert. Zuordnen laesst sich eine Zeile also nur ueber ihre Hoehe.
+        Darum bekommen beide Seiten dieselbe Einteilung: die
+        Zeichenflaeche wird in gleich hohe Zeilen geteilt, und die
+        Eintraege der Kanalliste werden auf genau diese Hoehen gebracht.
+
+        Geht das nicht - zu niedriges Fenster, eingeklappte Liste -,
+        bleibt es bei der gleichmaessigen Aufteilung allein im Plot.
+        """
+        tree = getattr(plot, "channel_list", None)
+        if tree is None or not rows:
+            return
+
+        area = plot.viewbox.sceneBoundingRect()
+        height = area.height()
+
+        if height < 20:
+            return
+
+        frame = tree.frameWidth()
+        header = 0 if tree.isHeaderHidden() else tree.header().height()
+
+        # Oberkante der ersten Zeile und Platz fuer alle Zeilen, beides
+        # ohne Umweg ueber das Rollfeld - das waere von der eigenen
+        # vorigen Einstellung abhaengig.
+        top_of_list = tree.mapToGlobal(QtCore.QPoint(0, frame + header)).y()
+        available = tree.height() - 2 * frame - header
+
+        scrollbar = tree.horizontalScrollBar()
+        if scrollbar is not None and scrollbar.isVisible():
+            available -= scrollbar.height()
+
+        top_of_plot = plot.mapToGlobal(QtCore.QPoint(0, int(area.top()))).y()
+
+        # Faengt die Liste tiefer an als die Zeichenflaeche, bleibt oben
+        # im Plot entsprechend Luft - dann stehen beide auf einer Hoehe.
+        start = max(top_of_list - top_of_plot, 0)
+
+        count = len(rows)
+        # zwei Bildpunkte Reserve, sonst kippt die Liste wegen Rundung in
+        # einen Rollbalken und verschiebt sich dadurch wieder
+        lane = min(height - start, available - 2) / count
+
+        if lane < 6:
+            return
+
+        for index, (uuid, item) in enumerate(rows):
+            first = start + index * lane
+            last = first + lane
+
+            # Ganze Bildpunkte, aber ohne sich aufzuaddieren
+            wanted = int(round(last)) - int(round(first))
+            if item.sizeHint(0).height() != wanted:
+                item.setSizeHint(0, QtCore.QSize(0, wanted))
+
+            if uuid not in bands:
+                continue
+
+            _y_range, (minimum, maximum) = bands[uuid]
+
+            # Wertebereich so legen, dass min..max genau auf dieser Zeile
+            # liegt: oben am Rand der Zeichenflaeche steht y_high. Ein
+            # Bildpunkt Luft, damit sich benachbarte Zeilen nicht beruehren.
+            scale = (maximum - minimum) / (last - first - 2)
+            y_high = maximum + (first + 1) * scale
+
+            bands[uuid] = ((y_high - height * scale, y_high), (minimum, maximum))
+
+        if tree.uniformRowHeights():
+            tree.setUniformRowHeights(False)
+
+    def _reset_list_rows(self, plot):
+        """Zeilenhoehen der Kanalliste wieder dem Stil ueberlassen."""
+        tree = getattr(plot, "channel_list", None)
+        if tree is None:
+            return
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.sizeHint(0).height() > 0:
+                item.setSizeHint(0, QtCore.QSize())
+
+        tree.setUniformRowHeights(True)
+
+    def schedule_strip_layout(self, plot, *args):
+        """Zeilen neu ausrichten, wenn Groesse oder Liste sich geaendert haben."""
+        if not getattr(plot, "digital_mode", False):
+            return
+
+        timer = getattr(plot, "_layout_timer", None)
+
+        if timer is None:
+            timer = QtCore.QTimer(plot)
+            timer.setSingleShot(True)
+            timer.timeout.connect(partial(self.layout_digital_strip, plot))
+            plot._layout_timer = timer
+
+        # beim Ziehen am Rand feuert das Signal laufend
+        timer.start(60)
 
     def _strip_button_clicked(self, name, plot):
         """Einer der vier Umschaltknoepfe in der Reihe eines Strips."""
@@ -3255,10 +3425,12 @@ class Plot(QtWidgets.QWidget):
             if label is None:
                 continue
 
-            if getattr(plot, "digital_mode", False):
-                label.setText(f"Strip {i} (digital)" if many else "digital")
-            else:
+            mode = self.window_mode(plot)
+
+            if mode == "analog":
                 label.setText(f"Strip {i}" if many else "")
+            else:
+                label.setText(f"Strip {i} ({mode})" if many else mode)
 
     def _wire_channel_list(self, tree, plot):
         """Alle Verbindungen einer Kanalliste herstellen.
@@ -3347,6 +3519,59 @@ class Plot(QtWidgets.QWidget):
             if pair is not None:
                 return (strip, *pair)
         raise KeyError(uuid)
+
+    def _wire_strip_region(self, plot):
+        """Bereichsmeldungen eines Strips mitlesen, um sie zu koppeln."""
+        plot.range_modified.connect(self._strip_region_modified)
+        plot.range_removed.connect(self._strip_region_removed)
+
+    def _toggle_strip_region(self, strip):
+        """Bereich eines Strips oeffnen oder schliessen - wie Taste R."""
+        strip.keyPressEvent(
+            QtGui.QKeyEvent(
+                QtCore.QEvent.Type.KeyPress,
+                QtCore.Qt.Key.Key_R,
+                QtCore.Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+    def _strip_region_modified(self, region):
+        """Bereich in allen Strips anlegen und gleich halten."""
+        if self._syncing_strip_region or region is None:
+            return
+
+        source = next((strip for strip in self.strips if strip.region is region), None)
+        if source is None:
+            return
+
+        bounds = region.getRegion()
+
+        self._syncing_strip_region = True
+        try:
+            for strip in self.strips:
+                if strip is source:
+                    continue
+
+                if strip.region is None:
+                    self._toggle_strip_region(strip)
+
+                if strip.region is not None and tuple(strip.region.getRegion()) != tuple(bounds):
+                    strip.region.setRegion(bounds)
+        finally:
+            self._syncing_strip_region = False
+
+    def _strip_region_removed(self):
+        """Bereich ueberall schliessen, wenn er in einem Strip verschwindet."""
+        if self._syncing_strip_region:
+            return
+
+        self._syncing_strip_region = True
+        try:
+            for strip in self.strips:
+                if strip.region is not None:
+                    self._toggle_strip_region(strip)
+        finally:
+            self._syncing_strip_region = False
 
     def _strip_cursor_moved(self, cursor):
         """Cursorposition auf alle anderen Strips uebertragen."""
@@ -4504,7 +4729,7 @@ class Plot(QtWidgets.QWidget):
                 stop_raw_v, raw_kind, stop_v, kind, fmt = signal.value_at_index(index)
 
                 if self.region_values_display_mode == "delta":
-                    item.set_prefix("Δ = ")
+                    item.set_prefix()
                     item.set_fmt(signal.format)
 
                     if "n.a." not in (start_v, stop_v):
@@ -4837,6 +5062,7 @@ class Plot(QtWidgets.QWidget):
             "strip_count": len(self.strips),
             "strip_sizes": [int(e) for e in self.strip_splitter.sizes()],
             "strip_digital": [bool(getattr(strip, "digital_mode", False)) for strip in self.strips],
+            "strip_modes": [self.window_mode(strip) for strip in self.strips],
             "pattern": self.pattern,
             "splitter": [int(e) for e in self.splitter.sizes()[:2]]
             + [
@@ -4962,6 +5188,12 @@ class Plot(QtWidgets.QWidget):
 
         if mode is None:
             self._settings.setValue("plot/region_values_display_mode", self.region_values_display_mode)
+
+        # Statt jeden Wert mit "Δ = " zu verlaengern, wandert das
+        # Zeichen in die Spaltenueberschrift - das spart Platz.
+        heading = "Δ" if self.region_values_display_mode == "delta" else "Value"
+        for tree in self.channel_lists():
+            tree.headerItem().setText(tree.ValueColumn, heading)
 
         self.range_modified()
 
@@ -5163,6 +5395,7 @@ class PlotGraphics(pg.PlotWidget):
 
         self.current_uuid = None
         self.digital_mode = False
+        self.enum_mode = False
 
         self.standalone = kwargs.get("standalone", False)
 
@@ -5267,6 +5500,9 @@ class PlotGraphics(pg.PlotWidget):
 
         self.y_axis.scale_editor_requested.connect(self.open_scale_editor)
         self.y_axis.rangeChanged.connect(self.set_y_range)
+
+        # Wie viel vom Kanalnamen auf die Achse passt, haengt an ihrer Hoehe
+        self.y_axis.geometryChanged.connect(self.refresh_axis_label)
 
         self.plot_item.setAxisItems({"left": self.y_axis, "bottom": self.x_axis})
 
@@ -6009,7 +6245,12 @@ class PlotGraphics(pg.PlotWidget):
         modifier = event.modifiers()
 
         handled = True
-        if key == QtCore.Qt.Key.Key_Y and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
+        if key in (QtCore.Qt.Key.Key_X, QtCore.Qt.Key.Key_Y) and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
+            # Zoomachse umschalten, wie in vSignalyzer. Gilt sofort fuer
+            # alle Strips und alle Fenster, nicht nur fuer dieses hier.
+            ViewBoxWithCursor.set_zoom_axis("x" if key == QtCore.Qt.Key.Key_X else "y")
+
+        elif key == QtCore.Qt.Key.Key_Y and modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
             if self.region is None:
                 pos = self.cursor1.value()
                 event_ = QtGui.QKeyEvent(
@@ -6070,7 +6311,8 @@ class PlotGraphics(pg.PlotWidget):
 
             self.update()
 
-        elif key == QtCore.Qt.Key.Key_X and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
+        elif key == QtCore.Qt.Key.Key_X and modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
+            # frueher auf X allein - X schaltet jetzt die Zoomachse um
             if self.region is not None:
                 self.viewbox.setXRange(*self.region.getRegion(), padding=0)
                 event_ = QtGui.QKeyEvent(
@@ -6246,6 +6488,10 @@ class PlotGraphics(pg.PlotWidget):
                     show_horizontal_line=self.cursor1.show_horizontal_line,
                     line_width=self.cursor1.line_width,
                 )
+                # Der zweite Cursor bekommt eine eigene Farbe, sonst sind
+                # Anfang und Ende des Bereichs nicht zu unterscheiden.
+                self.region.lines[1].color = second_cursor_color(color)
+
                 self.region.setZValue(-10)
                 self.viewbox.addItem(self.region)
                 self.region.sigRegionChanged.connect(self.range_modified.emit)
@@ -6904,6 +7150,9 @@ class PlotGraphics(pg.PlotWidget):
                 x = sig.plot_timestamps
 
                 if len(x):
+                    if self.enum_mode and self.draw_enum_bands(paint, sig, x_start):
+                        continue
+
                     x, y = self.scale_curve_to_pixmap(x, y, y_range=sig.y_range, x_start=x_start)
 
                     sig.pen.setWidth(pen_width)
@@ -7232,6 +7481,103 @@ class PlotGraphics(pg.PlotWidget):
         if self.region.moving_cursor is not None:
             self.cursor1.setPos(self.region.moving_cursor.pos())
 
+    def draw_enum_bands(self, paint, sig, x_start):
+        """Ein Signal als farbige Abschnitte mit Text zeichnen.
+
+        Jeder Wert bekommt seine eigene Farbe; wo der Wert konstant
+        bleibt, entsteht ein Balken mit der Beschriftung darin. Hat der
+        Kanal eine Wertetabelle, steht deren Text im Balken, sonst die
+        Zahl selbst. Der Balken fuellt die ganze Zeile des Signals, so
+        dass mehrere Signale als gleich hohe Zeilen untereinander
+        stehen - wie im Digitalfenster.
+        """
+        entries = enum_entries(conversion_of(sig))
+
+        if not self.py or sig.y_range is None:
+            return False
+
+        timestamps = sig.plot_timestamps
+        samples = sig.plot_samples
+
+        if not len(timestamps) or len(samples) != len(timestamps):
+            return False
+
+        # Ohne Wertetabelle nur dann Balken, wenn das Signal wirklich
+        # stufig ist - sonst wuerde jede Stuetzstelle ein Balken.
+        if not entries and len(samples) > 1:
+            if 1 + int(np.count_nonzero(samples[1:] != samples[:-1])) > 64:
+                return False
+
+        try:
+            y_low, y_high = (float(e) for e in sig.y_range)
+        except (TypeError, ValueError):
+            return False
+
+        # Die Zeile, die der Digitalmodus dem Signal zugeteilt hat. Ohne
+        # sie bliebe von einem Signal mit nur einem Wert ein Haarstrich.
+        band = getattr(sig, "enum_band", None)
+
+        try:
+            if band:
+                minimum, maximum = (float(e) for e in band)
+            else:
+                minimum, maximum = float(sig.min), float(sig.max)
+        except (TypeError, ValueError):
+            return False
+
+        y_scale = (y_high - y_low) / float(self.py)
+        if not y_scale:
+            return False
+
+        top = (y_high + y_scale - maximum) / y_scale
+        bottom = (y_high + y_scale - minimum) / y_scale
+
+        if bottom < top:
+            top, bottom = bottom, top
+
+        if bottom - top < 6:
+            middle = (top + bottom) / 2
+            top, bottom = middle - 3, middle + 3
+
+        height = bottom - top
+        px = self.px
+        if not px:
+            return False
+
+        metrics = QtGui.QFontMetrics(paint.font())
+        right_edge = self.viewbox.sceneBoundingRect().width() / px + timestamps[0]
+
+        start = 0
+        count = len(samples)
+
+        for index in range(1, count + 1):
+            if index < count and samples[index] == samples[start]:
+                continue
+
+            value = float(samples[start])
+            stop_time = timestamps[index] if index < count else max(timestamps[-1], right_edge)
+
+            x0 = (timestamps[start] - x_start) / px
+            x1 = (stop_time - x_start) / px
+
+            # Wert nicht in der Tabelle (oder gar keine Tabelle): die Zahl
+            # selbst zeigen, Farbe fest am Wert
+            text, color = entries.get(value) or (value_label(value), fn.mkColor(value_color(value)))
+
+            rect = QtCore.QRectF(x0, top, max(x1 - x0, 1.0), height)
+            paint.fillRect(rect, color)
+
+            # ascent statt height: eine Zeile ist nur so hoch wie der
+            # Eintrag in der Kanalliste, der Text passt trotzdem hinein
+            if text and rect.width() > metrics.horizontalAdvance(text) + 8 and height >= metrics.ascent():
+                # dunkle oder helle Schrift, je nach Helligkeit des Balkens
+                paint.setPen(QtCore.Qt.GlobalColor.black if color.lightness() > 127 else QtCore.Qt.GlobalColor.white)
+                paint.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+
+            start = index
+
+        return True
+
     def digital_fill_path(self, path, sig, x):
         """Treppenkurve bis zur Grundlinie schliessen, damit sie fuellbar wird.
 
@@ -7395,6 +7741,54 @@ class PlotGraphics(pg.PlotWidget):
 
         self.update()
 
+    def axis_label(self, sig, axis=None):
+        """Beschriftung der Y-Achse: Name und Einheit, auf die Achse gekuerzt.
+
+        Die Beschriftung laeuft laengs der Achse. Bei einem kurzen Strip
+        ist ein langer Kanalname laenger als die Achse hoch ist, und was
+        nicht hineinpasst, schneidet Qt wortlos ab. Also vorher selbst
+        kuerzen, und zwar in dieser Reihenfolge: erst den ganzen Namen
+        mit Einheit, dann den ganzen Namen ohne Einheit, erst zuletzt
+        den Namen mit Auslassungszeichen.
+        """
+        unit = f" [{sig.unit}]" if sig.unit else ""
+
+        height = int(axis.height()) if axis is not None else 0
+
+        if height < 40:
+            # Achse noch ohne Groesse: feste Obergrenze wie bisher
+            name = sig.name if len(sig.name) <= 32 else f"{sig.name[:29]}..."
+
+            return f"{name}{unit}"
+
+        metrics = QtGui.QFontMetrics(axis.label.font())
+        room = height - 16
+
+        if metrics.horizontalAdvance(f"{sig.name}{unit}") <= room:
+            return f"{sig.name}{unit}"
+
+        if metrics.horizontalAdvance(sig.name) <= room:
+            return sig.name
+
+        return metrics.elidedText(sig.name, QtCore.Qt.TextElideMode.ElideRight, max(room, 32))
+
+    def refresh_axis_label(self, *args):
+        """Beschriftung der Y-Achse an eine neue Fensterhoehe anpassen."""
+        # kann schon beim Aufbau des Fensters feuern
+        uuid = getattr(self, "current_uuid", None)
+        if uuid is None:
+            return
+
+        try:
+            signal, _index = self.signal_by_uuid(uuid)
+        except KeyError:
+            return
+
+        label = self.axis_label(signal, self.y_axis)
+
+        if label != getattr(self.y_axis, "labelText", None):
+            self.y_axis.setLabel(label)
+
     def set_current_uuid(self, uuid, force=False):
         axis = self.y_axis
         viewbox = self.viewbox
@@ -7421,19 +7815,14 @@ class PlotGraphics(pg.PlotWidget):
                         axis.set_pen(fn.mkPen(plot_foreground))
                         axis.setTextPen(plot_foreground)
 
-                axis.setLabel(self.common_axis_label)
+            # Nur das aktive Signal beschriften. Alle Namen der Achse
+            # aneinandergereiht sind ab dem dritten nicht mehr lesbar,
+            # und welches gerade gemeint ist, sieht man dann erst recht
+            # nicht. Dass die Achse geteilt ist, zeigt ihre helle Farbe.
+            axis.setLabel(self.axis_label(sig, axis))
 
         else:
-            if len(sig.name) <= 32:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name} [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name}")
-            else:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name[:29]}...  [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name[:29]}...")
+            axis.setLabel(self.axis_label(sig, axis))
 
             axis.set_pen(sig.pen)
             axis.setTextPen(sig.pen)
@@ -7687,11 +8076,51 @@ class PlotGraphics(pg.PlotWidget):
                     if isinstance(axis, FormatedAxis):
                         axis.setRange(*y_range)
                     update = True
+        if update:
+            self._sync_viewbox_to_current()
+
         if emit:
             self.zoom_changed.emit(False)
         if update:
             if not self._update_timer.isActive():
                 self._update_timer.start()
+
+    def _sync_viewbox_to_current(self):
+        """Zeichenflaeche auf den Bereich des aktiven Signals nachziehen.
+
+        Das Scrollrad ueber der Y-Achse aendert nur den Bereich des
+        Signals - gezeichnet wird ja ohnehin je Signal. Die
+        Zeichenflaeche selbst bleibt dabei auf ihrem alten Bereich
+        stehen, und das naechste Verschieben mit der Maus rechnet von
+        dort weiter. Dadurch war der Zoom beim ersten Schieben wieder
+        verloren.
+        """
+        if self.current_uuid is None:
+            return
+
+        try:
+            signal, _index = self.signal_by_uuid(self.current_uuid)
+        except KeyError:
+            return
+
+        if signal.y_range is None:
+            return
+
+        try:
+            wanted = tuple(float(value) for value in signal.y_range)
+        except (TypeError, ValueError):
+            return
+
+        if tuple(self.viewbox.viewRange()[1]) == wanted:
+            return
+
+        # stumm schalten, sonst schreibt der Bereichswechsel sofort
+        # wieder auf die Signale zurueck
+        self.viewbox.blockSignals(True)
+        try:
+            self.viewbox.setYRange(*wanted, padding=0)
+        finally:
+            self.viewbox.blockSignals(False)
 
     def signal_by_name(self, name):
         for i, sig in enumerate(self.signals):

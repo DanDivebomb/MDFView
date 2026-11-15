@@ -101,6 +101,11 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         self.progress = None
 
         self.files.tabCloseRequested.connect(self.close_file)
+
+        # Eine Messdatei je Fenster ist der Normalfall - die Leiste der
+        # Datei-Tabs erscheint erst, wenn wirklich mehrere offen sind.
+        # Die Tabs innerhalb einer Datei sind die Seiten.
+        self.files.setTabBarAutoHide(True)
         self.stackedWidget.currentChanged.connect(self.mode_changed)
 
         menu = self.menubar.addMenu("File")
