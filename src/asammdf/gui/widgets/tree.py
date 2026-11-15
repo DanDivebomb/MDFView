@@ -5,6 +5,7 @@ import json
 import os
 import re
 from traceback import format_exc
+from weakref import WeakSet
 
 import numpy as np
 from pyqtgraph import functions as fn
@@ -30,6 +31,22 @@ from .tree_item import MinimalTreeItem
 
 NOT_FOUND = 0xFFFFFFFF
 MINIMUM_COLUMN_WIDTH = 30
+
+# Nachkommastellen je Kanalname. Gilt fuer alle Plots und Strips der
+# laufenden Sitzung - ein Kanal soll ueberall gleich dargestellt werden.
+CHANNEL_PRECISION = {}
+
+
+def set_channel_precision(name, precision):
+    """Nachkommastellen eines Kanals ueberall setzen."""
+    CHANNEL_PRECISION[name] = precision
+
+    for tree in list(ChannelsTreeWidget.instances):
+        try:
+            tree.apply_channel_precision(name, precision)
+        except RuntimeError:
+            # Qt-Objekt bereits abgeraeumt
+            continue
 
 
 def substitude_mime_uuids(mime, uuid=None, force=False, random_uuid=False):
@@ -451,6 +468,8 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     OriginColumn = 6
     LockColumn = 7
 
+    instances = WeakSet()
+
     def __init__(
         self,
         hide_missing_channels=False,
@@ -460,6 +479,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        ChannelsTreeWidget.instances.add(self)
         self.plot = plot
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -474,7 +494,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         self.setHeaderHidden(False)
         self.setColumnCount(8)
-        self.setHeaderLabels(["Name", "Raw", "Value", "Unit", "\u290a", "\u21a8", "Origin", "\U0001f512"])
+        self.setHeaderLabels(["Name", "Raw", "Value", "Unit", "\u290a", "Y", "Origin", "\U0001f512"])
         self.setDragEnabled(True)
         self.setExpandsOnDoubleClick(False)
 
@@ -562,6 +582,16 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         """
         QtCore.QSettings().setValue("plot/channel_list_header_sizes", json.dumps(self.header_sizes()))
 
+    def apply_channel_precision(self, name, precision):
+        """Alle Eintraege dieses Kanalnamens auf die Nachkommastellen setzen."""
+        iterator = QtWidgets.QTreeWidgetItemIterator(self)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() != ChannelsTreeItem.Channel:
+                continue
+            if item.signal.name == name and item.precision != precision:
+                item.precision = precision
+
     def apply_stored_header_sizes(self):
         """Gemerkte Breiten uebernehmen, falls welche hinterlegt sind."""
         raw = QtCore.QSettings().value("plot/channel_list_header_sizes", "", str)
@@ -624,16 +654,43 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     def dragLeaveEvent(self, e):
         self.autoscroll_timer.stop()
         self.autoscroll_mouse_pos = None
+
+        window = self.plot
+        if hasattr(window, "strip_hint_hide"):
+            window.strip_hint_hide()
+
         e.accept()
 
     def dragMoveEvent(self, e):
         self.autoscroll_mouse_pos = e.answerRect().y()
+
+        # Auswahlfeld fuehren - Abwuerfe auf eine Kanalliste kommen hier
+        # an und nicht im Plotfenster.
+        window = self.plot
+        if hasattr(window, "strip_hint_update"):
+            window.strip_hint_update(getattr(self, "owner_plot", None), e.position().toPoint())
+
         e.accept()
 
     def dropEvent(self, e):
         self.autoscroll_timer.stop()
         self.autoscroll_mouse_pos = None
         self.drop_target = None
+
+        window = self.plot
+        owner = getattr(self, "owner_plot", None)
+        offset = window.strip_hint_take() if hasattr(window, "strip_hint_take") else 0
+
+        # Zug aus einer Kanalliste dieses Fensters - auch aus dieser hier,
+        # wenn ein neuer Strip gewaehlt wurde.
+        if hasattr(window, "drop_from_own_list") and window.drop_from_own_list(e.source(), owner, offset):
+            e.accept()
+            self.refresh()
+            self.update_channel_groups_count()
+            return
+
+        if offset and hasattr(window, "schedule_strip_choice"):
+            window.schedule_strip_choice(owner, offset)
 
         if e.source() is self:
             item = self.itemAt(6, 6)
@@ -1060,7 +1117,9 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == QtCore.Qt.MouseButton.RightButton:
-            self.context_menu_timer.start(300)
+            # Frueher musste man die Taste eine Drittelsekunde halten -
+            # das hat niemand gefunden.
+            self.context_menu_timer.start(0)
             self.context_menu_pos = event.position().toPoint()
 
         if self.context_menu is not None:
@@ -1173,6 +1232,12 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         action.setShortcut(QtGui.QKeySequence("Ctrl+V"))
         submenu.addAction(action)
         menu.addMenu(submenu)
+
+        if hasattr(self.plot, "move_selection_to_new_strip"):
+            submenu = QtWidgets.QMenu("Strip")
+            submenu.addAction("Move to new strip above")
+            submenu.addAction("Move to new strip below")
+            menu.addMenu(submenu)
 
         submenu = QtWidgets.QMenu("Enable/disable")
         if item and item.type() == item.Group and item.isDisabled():
@@ -1571,6 +1636,11 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                     if item.type() == ChannelsTreeItem.Channel:
                         item.unit = unit
 
+        elif action_text in ("Move to new strip above", "Move to new strip below"):
+            window = self.plot
+            if hasattr(window, "move_selection_to_new_strip"):
+                window.move_selection_to_new_strip(self, -1 if action_text.endswith("above") else 1)
+
         elif action_text == "Set precision":
             selected_items = self.selectedItems()
 
@@ -1595,9 +1665,11 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             )
 
             if ok:
+                # ueber alle Fenster, damit derselbe Kanal ueberall gleich
+                # aussieht - auch in anderen Strips und Plots
                 for item in selected_items:
                     if item.type() == ChannelsTreeItem.Channel:
-                        item.precision = precision
+                        set_channel_precision(item.signal.name, precision)
                     elif item.type() == ChannelsTreeItem.Group:
                         for channel_item in item.get_all_channel_items():
                             channel_item.precision = precision
@@ -2194,9 +2266,9 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setToolTip(self.ValueColumn, "")
             self.setToolTip(self.RawColumn, "")
             self.setToolTip(self.UnitColumn, "unit")
-            self.setToolTip(self.LockColumn, "Y-Bereich dieses Signals festhalten")
+            self.setToolTip(self.LockColumn, "Keep this signal's Y range fixed")
             self.setToolTip(self.CommonAxisColumn, "common axis")
-            self.setToolTip(self.IndividualAxisColumn, "individual axis")
+            self.setToolTip(self.IndividualAxisColumn, "own Y axis for this channel")
 
             self.setText(self.UnitColumn, signal.unit)
 

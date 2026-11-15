@@ -11,6 +11,9 @@ from pyqtgraph.Point import Point
 from PySide6 import QtCore, QtGui, QtWidgets
 
 LOCAL_TIMEZONE = datetime.now(timezone.utc).astimezone().tzinfo
+# Breite des Greifbereichs am inneren Rand der Skala
+WIDTH_HANDLE = 6
+
 BUTTON_SIZE = 16
 
 
@@ -33,6 +36,8 @@ class FormatedAxis(pg.AxisItem):
         self.format = "phys"
         self.mode = "phys"
         self.text_conversion = None
+        self._enumeration_cache = (None, [])
+        self._on_width_handle = False
         self.origin = None
 
         self.hovering = False
@@ -68,6 +73,64 @@ class FormatedAxis(pg.AxisItem):
         else:
             super().setWidth(w)
 
+    def enumeration_values(self):
+        """Die in der Umrechnungstabelle hinterlegten Rohwerte.
+
+        Bei einer Wertetabelle mit Texten soll die Achse nur diese Werte
+        beschriften - die Zahlen dazwischen bedeuten nichts.
+        """
+        conversion = self.text_conversion
+
+        cached_for, cached = self._enumeration_cache
+        if cached_for is conversion:
+            return cached
+
+        values = []
+
+        if conversion is not None:
+            count = int(getattr(conversion, "val_param_nr", 0) or 0)
+            blocks = getattr(conversion, "referenced_blocks", None) or {}
+            texts = sum(1 for key in blocks if key.startswith("text_"))
+
+            # Bereichstabelle: zwei Grenzen je Text, davon die untere
+            step = 2 if texts and count == 2 * texts else 1
+
+            for index in range(0, count, step):
+                value = getattr(conversion, f"val_{index}", None)
+                if value is None:
+                    continue
+                try:
+                    values.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+
+            values.sort()
+
+        self._enumeration_cache = (conversion, values)
+
+        return values
+
+    def enumeration_tick_values(self, minVal, maxVal):
+        """Sichtbare Tabellenwerte, oder None fuer die normale Einteilung."""
+        low, high = (minVal, maxVal) if minVal <= maxVal else (maxVal, minVal)
+
+        values = [value for value in self.enumeration_values() if low <= value <= high]
+
+        # Nichts im Bild oder zu viele Eintraege: lieber die uebliche
+        # Einteilung, sonst klebt die Beschriftung uebereinander.
+        if not values or len(values) > 40:
+            return None
+
+        return values
+
+    def tickValues(self, minVal, maxVal, size):
+        if self.text_conversion is not None and self.mode == "phys":
+            values = self.enumeration_tick_values(minVal, maxVal)
+            if values is not None:
+                return [(None, values)]
+
+        return super().tickValues(minVal, maxVal, size)
+
     def tickStrings(self, values, scale, spacing):
         strns = []
         self.tick_positions = values
@@ -93,9 +156,13 @@ class FormatedAxis(pg.AxisItem):
 
                 if isinstance(nv, bytes):
                     try:
-                        strns.append(f"{val}={nv.decode('utf-8', errors='replace')}")
+                        text = nv.decode("utf-8", errors="replace")
                     except:
-                        strns.append(f"{val}={nv.decode('latin-1', errors='replace')}")
+                        text = nv.decode("latin-1", errors="replace")
+
+                    # nur der Text - die Rohzahl davor stiftet mehr
+                    # Verwirrung als Nutzen
+                    strns.append(text or val)
                 else:
                     strns.append(val)
         else:
@@ -186,7 +253,43 @@ class FormatedAxis(pg.AxisItem):
         lsbl = f"<span style='{style}'>{s}</span>"
         return lsbl
 
+    def on_width_handle(self, pos):
+        """Liegt die Position am inneren Rand der Skala?"""
+        if self.orientation == "left":
+            return pos.x() >= self.width() - WIDTH_HANDLE
+        elif self.orientation == "right":
+            return pos.x() <= WIDTH_HANDLE
+
+        return False
+
+    def hoverMoveEvent(self, event):
+        if self.orientation in ("left", "right"):
+            on_handle = self.on_width_handle(event.pos())
+            if on_handle != self._on_width_handle:
+                self._on_width_handle = on_handle
+                if on_handle:
+                    self.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+                else:
+                    self.unsetCursor()
+
+        super().hoverMoveEvent(event)
+
     def mouseDragEvent(self, event):
+        # Am inneren Rand zieht die Maus die Breite der Skala - auch bei
+        # gesperrter Achse, denn das ist reine Darstellung.
+        if self.orientation in ("left", "right") and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if self.on_width_handle(event.buttonDownPos()):
+                event.accept()
+
+                delta = event.pos().x() - event.lastPos().x()
+                if self.orientation == "right":
+                    delta = -delta
+
+                self.setWidth(int(self.width() + delta))
+                self.picture = None
+                self.update()
+                return
+
         if self.locked:
             return
 

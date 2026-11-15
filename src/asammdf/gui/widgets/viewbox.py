@@ -39,6 +39,19 @@ class ViewBoxMenu(QtWidgets.QMenu):
         self.mouseModes = [pan, cursor]
         self.addMenu(self.mouse_mode_menu)
 
+        # Strip-Befehle - gelten fuer den Strip, in den geklickt wurde
+        self.strip_menu = QtWidgets.QMenu("Strip")
+        for text, slot in (
+            ("Insert strip above", partial(self.strip_command, "above")),
+            ("Insert strip below", partial(self.strip_command, "below")),
+            ("Move strip up", partial(self.strip_command, "up")),
+            ("Move strip down", partial(self.strip_command, "down")),
+            ("Delete strip", partial(self.strip_command, "delete")),
+        ):
+            self.strip_menu.addAction(text, slot)
+
+        self.addMenu(self.strip_menu)
+
         # X zoom mode
         self.x_zoom_mode_menu = QtWidgets.QMenu("X-axis zoom mode")
         group = QtGui.QActionGroup(self)
@@ -117,9 +130,43 @@ class ViewBoxMenu(QtWidgets.QMenu):
     def popup(self, *args):
         if not self.valid:
             self.updateState()
+
+        window, _strip = self.strip_window()
+        self.strip_menu.menuAction().setVisible(window is not None)
+
         QtWidgets.QMenu.popup(self, *args)
 
+    def strip_window(self):
+        """(Fenster, Strip) des Strips, in dem geklickt wurde."""
+        strip = getattr(self.view(), "plot", None)
+        window = getattr(strip, "plot_parent", None)
+
+        if window is None or not hasattr(window, "strips") or strip not in window.strips:
+            return None, None
+
+        return window, strip
+
+    def strip_command(self, command):
+        window, strip = self.strip_window()
+
+        if window is None:
+            return
+
+        index = window.strips.index(strip)
+
+        if command == "above":
+            window.set_active_strip(window.add_strip(index))
+        elif command == "below":
+            window.set_active_strip(window.add_strip(index + 1))
+        elif command == "up":
+            window.move_strip(strip, -1)
+        elif command == "down":
+            window.move_strip(strip, 1)
+        elif command == "delete":
+            window.remove_strip(strip)
+
     def set_mouse_mode(self, mode):
+        self._settings.setValue("plot/mouse_mode", mode)
         self.view().setLeftButtonAction(mode)
 
     def set_x_zoom_mode(self, on_cursor=True):
@@ -179,6 +226,11 @@ class ViewBoxWithCursor(pg.ViewBox):
         self.plot = plot
 
         self._settings = QtCore.QSettings()
+
+        # gemerkten Mausmodus uebernehmen
+        mode = self._settings.value("plot/mouse_mode", "pan", str)
+        if mode in ("pan", "cursor", "rect"):
+            self.setLeftButtonAction(mode)
 
     def close(self):
         self.cursor = None
@@ -252,12 +304,13 @@ class ViewBoxWithCursor(pg.ViewBox):
                 tr = fn.invertQTransform(tr)
                 tr = tr.map(dif * mask) - tr.map(pg.Point(0, 0))
 
+                # auch senkrecht schieben, soweit die Y-Achse frei ist
                 x = tr.x() if mask[0] == 1 else None
-                mask[1] = 0
+                y = tr.y() if mask[1] == 1 else None
 
                 self._resetTarget()
-                if x is not None:
-                    self.translateBy(x=x, y=0)
+                if x is not None or y is not None:
+                    self.translateBy(x=x, y=y)
                 self.sigRangeChangedManually.emit(mask)
 
         else:

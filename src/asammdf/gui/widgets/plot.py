@@ -127,7 +127,7 @@ from .channel_stats import ChannelStats
 from .cursor import Bookmark, Cursor, Region
 from .dict_to_tree import ComputedChannelInfoWindow
 from .formated_axis import FormatedAxis
-from .tree import ChannelsTreeItem, ChannelsTreeWidget, validate_drag_items
+from .tree import CHANNEL_PRECISION, ChannelsTreeItem, ChannelsTreeWidget, validate_drag_items
 
 bin_ = bin
 
@@ -166,6 +166,84 @@ def get_descriptions_by_uuid(mime):
                 descriptions.update(get_descriptions_by_uuid(item["channels"]))
 
     return descriptions
+
+
+class StripDropHint(QtWidgets.QWidget):
+    """Auswahlfeld, das waehrend des Ziehens neben dem Mauszeiger steht.
+
+    Ein echtes Menue geht waehrend eines Ziehvorgangs nicht auf - Windows
+    haelt die Maus gefangen und das Menue bekaeme keine Klicks. Dieses
+    Feld braucht keine: es wird nur gezeichnet, die Auswahl folgt der
+    Mausposition, und beim Loslassen gilt, was hervorgehoben ist.
+    """
+
+    ROW_HEIGHT = 26
+    WIDTH = 180
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint)
+
+        # Das Feld darf dem Ziehvorgang nicht in die Quere kommen.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        self.rows = ("New strip above", "Add to this strip", "New strip below")
+        self.choice = 1
+
+        self.resize(self.WIDTH, self.ROW_HEIGHT * 3)
+
+    def show_for(self, global_position, middle):
+        self.rows = ("New strip above", middle, "New strip below")
+        self.choice = 1
+
+        # seitlich versetzt, damit der Zeiger nie darauf steht
+        self.move(global_position.x() + 24, global_position.y() - self.height() // 2)
+
+        self.show()
+        self.raise_()
+        self.update()
+
+    def update_choice(self, global_position):
+        row = int((global_position.y() - self.y()) // self.ROW_HEIGHT)
+        row = max(0, min(2, row))
+
+        if row != self.choice:
+            self.choice = row
+            self.update()
+
+        return self.choice
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
+
+        palette = self.palette()
+        # Window statt ToolTip: sonst gelb, egal ob helles oder dunkles Thema
+        background = palette.color(QtGui.QPalette.ColorRole.Window)
+        foreground = palette.color(QtGui.QPalette.ColorRole.WindowText)
+        highlight = palette.color(QtGui.QPalette.ColorRole.Highlight)
+        highlight_text = palette.color(QtGui.QPalette.ColorRole.HighlightedText)
+
+        painter.fillRect(self.rect(), background)
+        painter.setPen(foreground)
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+        for index, text in enumerate(self.rows):
+            rect = QtCore.QRect(1, index * self.ROW_HEIGHT, self.width() - 2, self.ROW_HEIGHT)
+
+            if index == self.choice:
+                painter.fillRect(rect, highlight)
+                painter.setPen(highlight_text)
+            else:
+                painter.setPen(foreground)
+
+            painter.drawText(
+                rect.adjusted(8, 0, -8, 0),
+                QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft,
+                text,
+            )
+
+        painter.end()
 
 
 class TimevaseOverview(QtWidgets.QWidget):
@@ -1803,8 +1881,22 @@ class Plot(QtWidgets.QWidget):
         self.plot.viewport().installEventFilter(self)
         self._syncing_strip_cursor = False
         self._syncing_strip_heights = False
+        self._drop_choice_strip = None
+        self._drop_choice_before = set()
+        self._drop_choice_offset = 0
+        self._drag_dwell_strip = None
+        self._drag_dwell_pos = None
+        self._drag_dwell_start = 0.0
+        self._strip_hint = None
+        self._hint_timer = None
         if self.plot.cursor1 is not None:
             self.plot.cursor_moved.connect(self._strip_cursor_moved)
+        self._strip_cursor_style = {
+            "show_circle": show_cursor_circle,
+            "show_horizontal_line": show_cursor_horizontal_line,
+            "line_width": cursor_line_width,
+            "color": cursor_color,
+        }
         self._strip_kwargs = {
             "with_dots": with_dots,
             "line_interconnect": self.line_interconnect,
@@ -2156,6 +2248,12 @@ class Plot(QtWidgets.QWidget):
                 if description.get("user_defined_name", None):
                     item.name = description["user_defined_name"]
 
+            # Hat der Benutzer fuer diesen Kanalnamen Nachkommastellen
+            # eingestellt, gelten sie auch fuer neue Vorkommen.
+            precision = CHANNEL_PRECISION.get(sig.name, None)
+            if precision is not None and item.precision != precision:
+                item.precision = precision
+
             if enforce_y_axis:
                 item.setCheckState(item.CommonAxisColumn, QtCore.Qt.CheckState.Checked)
 
@@ -2177,6 +2275,9 @@ class Plot(QtWidgets.QWidget):
         self._pending_strip_count = 0
         self.apply_strip_assignment(descriptions, pending)
 
+        for strip in self.strips:
+            self.layout_digital_strip(strip)
+
     # ------------------------------------------------------------------
     # Strips (Subplots innerhalb dieses Fensters)
     # ------------------------------------------------------------------
@@ -2196,6 +2297,10 @@ class Plot(QtWidgets.QWidget):
             index = len(self.strips)
 
         if plot.cursor1 is not None:
+            # Aussehen des Cursors wie im ersten Strip
+            for name, value in getattr(self, "_strip_cursor_style", {}).items():
+                setattr(plot.cursor1, name, value)
+
             plot.cursor_moved.connect(self._strip_cursor_moved)
 
         plot.viewport().installEventFilter(self)
@@ -2270,17 +2375,15 @@ class Plot(QtWidgets.QWidget):
 
         Nur bei mehr als einem Strip - sonst waere der Rahmen nur Unruhe.
         """
-        many = len(self.strips) > 1
+        # Der aktive Strip wird nicht mehr hervorgehoben: Kanaele landen
+        # dort, wo man sie fallen laesst, und die Knoepfe gehoeren ohnehin
+        # sichtbar zu ihrem Strip. Die Markierung war nur Unruhe.
         for strip in self.strips:
-            if many and strip is self.plot:
-                strip.setFrameShape(QtWidgets.QFrame.Shape.Box)
-                strip.setLineWidth(1)
-            else:
-                strip.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            strip.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
             tree = getattr(strip, "channel_list", None)
             if tree is not None:
-                tree.setFrameShape(strip.frameShape())
+                tree.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
     def _equalize_strips(self):
         """Allen Strips die gleiche Hoehe geben.
@@ -2301,27 +2404,104 @@ class Plot(QtWidgets.QWidget):
         if total > 0:
             self.list_splitter.setSizes([max(total // count, 1)] * count)
 
+    def _strip_for_object(self, obj):
+        """Zu welchem Strip gehoert dieses Qt-Objekt?"""
+        for strip in self.strips:
+            tree = getattr(strip, "channel_list", None)
+            panel = getattr(strip, "list_panel", None)
+
+            if (
+                obj is strip.viewport()
+                or (tree is not None and obj is tree.viewport())
+                or (panel is not None and obj is panel)
+            ):
+                return strip
+
+        return None
+
     def eventFilter(self, obj, event):
-        """Ein Klick in einen Strip macht ihn zum aktiven."""
-        if event.type() in (
+        """Klicks und Ziehvorgaenge der Strips mitlesen.
+
+        Die Ereignisse gehen an die Anzeigeflaeche der Strips. Hier
+        liegen sie vor deren eigenen Handlern, deshalb laeuft die
+        Auswahl des Zielstrips zuverlaessig an dieser Stelle.
+        """
+        kind = event.type()
+
+        if kind in (
             QtCore.QEvent.Type.MouseButtonPress,
             QtCore.QEvent.Type.DragEnter,
             QtCore.QEvent.Type.Drop,
         ):
-            for strip in self.strips:
-                tree = getattr(strip, "channel_list", None)
-                panel = getattr(strip, "list_panel", None)
-                hit = (
-                    obj is strip.viewport()
-                    or (tree is not None and obj is tree.viewport())
-                    or (panel is not None and obj is panel)
-                )
-                if hit:
-                    if strip is not self.plot:
-                        self.set_active_strip(strip)
-                    break
+            strip = self._strip_for_object(obj)
+            if strip is not None and strip is not self.plot:
+                self.set_active_strip(strip)
 
         return super().eventFilter(obj, event)
+
+    def _strip_uuids(self, strip):
+        """uuids aller Kanaele eines Strips."""
+        uuids = set()
+        tree = getattr(strip, "channel_list", None)
+
+        if tree is None:
+            return uuids
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() == ChannelsTreeItem.Channel:
+                uuids.add(item.uuid)
+
+        return uuids
+
+    def schedule_strip_choice(self, strip, offset):
+        """Die gerade abgelegten Kanaele in einen neuen Strip umhaengen.
+
+        Erst nach dem Abwurf, weil die Kanaele vorher noch nicht da sind.
+        """
+        if strip is None or strip not in self.strips or not offset:
+            return
+
+        self._drop_choice_strip = strip
+        self._drop_choice_offset = offset
+        self._drop_choice_before = self._strip_uuids(strip)
+        QtCore.QTimer.singleShot(250, self._move_dropped_to_new_strip)
+
+    def _move_dropped_to_new_strip(self):
+        """Die neu hinzugekommenen Kanaele in einen neuen Strip legen."""
+        strip = getattr(self, "_drop_choice_strip", None)
+        before = getattr(self, "_drop_choice_before", set())
+        offset = getattr(self, "_drop_choice_offset", 0)
+
+        self._drop_choice_strip = None
+        self._drop_choice_before = set()
+        self._drop_choice_offset = 0
+
+        if strip is None or strip not in self.strips or not offset:
+            return
+
+        tree = getattr(strip, "channel_list", None)
+        if tree is None:
+            return
+
+        items = []
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() == ChannelsTreeItem.Channel and item.uuid not in before:
+                items.append(item)
+
+        if not items:
+            return
+
+        index = self.strips.index(strip) + (0 if offset < 0 else 1)
+        target = self.add_strip(index)
+
+        if not self.move_items_to_strip(tree, items, target):
+            self.remove_strip(target)
+        else:
+            self.set_active_strip(target)
 
     def add_strip_action(self):
         """Neuen Strip unter dem aktiven anlegen und dorthin wechseln."""
@@ -2473,6 +2653,12 @@ class Plot(QtWidgets.QWidget):
         for strip in self.strips:
             self._restore_strip_state(strip, descriptions)
 
+        digital = getattr(self, "_pending_strip_digital", None) or []
+        self._pending_strip_digital = []
+        for index, state in enumerate(digital):
+            if state and index < len(self.strips):
+                self.set_digital_mode(self.strips[index], True)
+
         self.set_active_strip(self.strips[0])
         self._equalize_strips()
 
@@ -2580,11 +2766,9 @@ class Plot(QtWidgets.QWidget):
                 vb.setXRange(*master.viewRange()[0], padding=0)
                 vb.setXLink(master)
 
-            # Zeitachse nur beim untersten Strip
-            if i == len(self.strips) - 1:
-                plot.plotItem.showAxis("bottom")
-            else:
-                plot.plotItem.hideAxis("bottom")
+            # Jeder Strip bekommt seine eigene Zeitachse - sonst muss man
+            # beim Ablesen immer zum untersten Strip schauen.
+            plot.plotItem.showAxis("bottom")
 
         self._number_strips()
         self._mark_active_strip()
@@ -2614,18 +2798,21 @@ class Plot(QtWidgets.QWidget):
 
         cmd = QtWidgets.QPushButton("Cmd")
         cmd.setMenu(self._build_strip_menu(plot))
-        cmd.setToolTip("Befehle fuer diesen Strip")
+        cmd.setToolTip("Commands for this strip")
         row.addWidget(cmd)
 
         buttons = (
-            ("▲", "Diesen Strip nach oben schieben", lambda: self.move_strip(plot, -1)),
-            ("▼", "Diesen Strip nach unten schieben", lambda: self.move_strip(plot, 1)),
+            ("▲", "Move this strip up", lambda: self.move_strip(plot, -1), ""),
+            ("▼", "Move this strip down", lambda: self.move_strip(plot, 1), ""),
+            ("×", "Delete this strip", lambda: self.remove_strip(plot), "color: #d04030; font-weight: bold;"),
         )
 
-        for text, tip, slot in buttons:
+        for text, tip, slot, style in buttons:
             btn = QtWidgets.QPushButton(text)
             btn.setToolTip(tip)
             btn.setFixedWidth(24)
+            if style:
+                btn.setStyleSheet(style)
             btn.clicked.connect(slot)
             row.addWidget(btn)
 
@@ -2689,23 +2876,23 @@ class Plot(QtWidgets.QWidget):
         entry(":/stack.png", "Stack", key(QtCore.Qt.Key.Key_S))
 
         menu.addSeparator()
-        entry(":/zoom-in.png", "Zoom hinein", key(QtCore.Qt.Key.Key_I))
-        entry(":/zoom-out.png", "Zoom heraus", key(QtCore.Qt.Key.Key_O))
-        undo = entry(":/undo.png", "Zoom zurueck", self.undo_zoom)
-        redo = entry(":/redo.png", "Zoom vorwaerts", self.redo_zoom)
+        entry(":/zoom-in.png", "Zoom in", key(QtCore.Qt.Key.Key_I))
+        entry(":/zoom-out.png", "Zoom out", key(QtCore.Qt.Key.Key_O))
+        undo = entry(":/undo.png", "Undo zoom", self.undo_zoom)
+        redo = entry(":/redo.png", "Redo zoom", self.redo_zoom)
         menu._strip_zoom_actions = (undo, redo)
 
         menu.addSeparator()
-        entry(":/increase-font.png", "Schrift groesser", self.increase_font)
-        entry(":/decrease-font.png", "Schrift kleiner", self.decrease_font)
+        entry(":/increase-font.png", "Increase font", self.increase_font)
+        entry(":/decrease-font.png", "Decrease font", self.decrease_font)
 
         menu.addSeparator()
         # Nur die Umschalter, fuer die es keinen eigenen Knopf gibt.
         toggles = {}
         for name, text in (
-            ("hide_axes", "Achsen ausblenden"),
-            ("value_panel", "Wertefeld oben rechts ausblenden"),
-            ("locked", "Alle Y-Achsen dieses Strips sperren"),
+            ("hide_axes", "Hide axes"),
+            ("value_panel", "Hide selected channel value panel"),
+            ("locked", "Lock all Y axes of this strip"),
         ):
             action = menu.addAction(text)
             action.setCheckable(True)
@@ -2714,11 +2901,12 @@ class Plot(QtWidgets.QWidget):
         menu._strip_toggles = toggles
 
         menu.addSeparator()
-        menu.addAction("Strip darueber einfuegen", lambda: self._add_strip_above(plot))
-        menu.addAction("Strip darunter einfuegen", lambda: self._add_strip_below(plot))
-        menu.addAction("Strip nach oben", lambda: self.move_strip(plot, -1))
-        menu.addAction("Strip nach unten", lambda: self.move_strip(plot, 1))
-        menu.addAction("Strip loeschen", lambda: self.remove_strip(plot))
+        # Beschriftung wechselt je nach Zustand - siehe aboutToShow.
+        menu._strip_digital_action = menu.addAction(
+            "Digital window", lambda: self.toggle_digital_mode(plot)
+        )
+
+        # Die Strip-Befehle stehen im Rechtsklickmenue der Zeichenflaeche.
 
         menu.aboutToShow.connect(partial(self._strip_menu_about_to_show, plot, menu))
 
@@ -2743,12 +2931,258 @@ class Plot(QtWidgets.QWidget):
             action.setChecked(state[name])
             action.blockSignals(False)
 
+        action = getattr(menu, "_strip_digital_action", None)
+        if action is not None:
+            action.setText("Analog window" if getattr(plot, "digital_mode", False) else "Digital window")
+
         undo, redo = getattr(menu, "_strip_zoom_actions", (None, None))
         has_history = self.enable_zoom_history and hasattr(self, "undo_btn")
         if undo is not None:
             undo.setEnabled(has_history and self.undo_btn.isEnabled())
         if redo is not None:
             redo.setEnabled(has_history and self.redo_btn.isEnabled())
+
+    def drop_from_own_list(self, source, strip, offset):
+        """Abwurf eines Zugs aus einer eigenen Kanalliste.
+
+        Liefert True, wenn der Umzug erledigt ist. Mit Richtung entsteht
+        vorher der neue Strip - auch dann, wenn das Signal aus genau dem
+        Strip kommt, ueber dem die Maus steht.
+        """
+        if strip is None or strip not in self.strips or source not in self.channel_lists():
+            return False
+
+        target = strip
+
+        if offset:
+            index = self.strips.index(strip) + (0 if offset < 0 else 1)
+            target = self.add_strip(index)
+
+        items = validate_drag_items(source.invisibleRootItem(), source.selectedItems(), [])
+
+        if self.move_items_to_strip(source, items, target):
+            self.set_active_strip(target)
+            return True
+
+        if offset:
+            self.remove_strip(target)
+
+        return False
+
+    def move_selection_to_new_strip(self, tree, offset):
+        """Markierte Kanaele in einen neuen Strip darueber oder darunter."""
+        source = getattr(tree, "owner_plot", None)
+
+        if source is None or source not in self.strips:
+            return False
+
+        items = validate_drag_items(tree.invisibleRootItem(), tree.selectedItems(), [])
+
+        if not items:
+            return False
+
+        index = self.strips.index(source) + (1 if offset > 0 else 0)
+        target = self.add_strip(index)
+
+        if not self.move_items_to_strip(tree, items, target):
+            self.remove_strip(target)
+            return False
+
+        return True
+
+    def toggle_digital_mode(self, plot):
+        self.set_digital_mode(plot, not getattr(plot, "digital_mode", False))
+
+    def set_digital_mode(self, plot, state):
+        """Strip zwischen analoger und digitaler Darstellung umschalten.
+
+        Digital heisst: jedes Signal bekommt sein eigenes waagrechtes
+        Band, die Kurven laufen als Treppe und die gemeinsame Y-Skala
+        entfaellt - so wie das Digitalfenster in MDA.
+        """
+        state = bool(state)
+        plot.digital_mode = state
+
+        if state:
+            # Eine gemeinsame Achse vertraegt sich nicht mit eigenen
+            # Baendern: jede Bereichsaenderung wuerde auf alle Signale
+            # der Achse durchschlagen und sie wieder uebereinanderlegen.
+            plot._analog_common_axis = self._common_axis_uuids(plot) | set(plot.common_axis_items)
+            self._set_common_axis_checks(plot, plot._analog_common_axis, False)
+
+            # Der Haken allein genuegt nicht: bei gesperrtem Strip laeuft
+            # der Handler gar nicht, und dann bleibt die Mitgliedschaft
+            # bestehen und zieht beim naechsten Bereichswechsel wieder
+            # alle Signale zusammen.
+            plot.common_axis_items.clear()
+            plot.common_axis_label = ""
+
+            plot._analog_line_interconnect = plot.line_interconnect
+            plot.set_line_interconnect("right")
+            plot.y_axis.hide()
+            plot.viewbox.setMouseEnabled(y=False)
+            self.layout_digital_strip(plot)
+        else:
+            plot.set_line_interconnect(getattr(plot, "_analog_line_interconnect", ""))
+
+            if not self.hide_axes_btn.isFlat():
+                plot.y_axis.show()
+
+            plot._update_y_mouse()
+
+            # zurueck auf den eigenen Wertebereich jedes Signals
+            for signal in plot.signals:
+                if signal.empty or signal.min == "n.a.":
+                    continue
+
+                was_locked = signal.y_locked
+                signal.y_locked = False
+                signal.y_range = float(signal.min), float(signal.max)
+                signal.y_locked = was_locked
+
+            if plot.current_uuid is not None:
+                plot.set_current_uuid(plot.current_uuid, True)
+
+            restore = getattr(plot, "_analog_common_axis", set())
+            self._set_common_axis_checks(plot, restore, True)
+
+            for uuid in restore:
+                try:
+                    plot.signal_by_uuid(uuid)
+                except KeyError:
+                    continue
+                plot.common_axis_items.add(uuid)
+
+            if plot.common_axis_items:
+                plot.common_axis_label = ", ".join(
+                    plot.signal_by_uuid(uuid)[0].name for uuid in plot.common_axis_items
+                )
+
+            plot._analog_common_axis = set()
+
+        self._number_strips()
+        plot.update()
+
+    def _common_axis_uuids(self, plot):
+        """uuids der Kanaele, die in diesem Strip auf der gemeinsamen Achse liegen."""
+        uuids = set()
+        tree = getattr(plot, "channel_list", None)
+        if tree is None:
+            return uuids
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() == ChannelsTreeItem.Channel:
+                if item.checkState(item.CommonAxisColumn) == QtCore.Qt.CheckState.Checked:
+                    uuids.add(item.uuid)
+
+        return uuids
+
+    def _set_common_axis_checks(self, plot, uuids, state):
+        """Haken der gemeinsamen Achse setzen; den Rest macht der Handler."""
+        if not uuids:
+            return
+
+        tree = getattr(plot, "channel_list", None)
+        if tree is None:
+            return
+
+        check = QtCore.Qt.CheckState.Checked if state else QtCore.Qt.CheckState.Unchecked
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() != ChannelsTreeItem.Channel or item.uuid not in uuids:
+                continue
+            if item.checkState(item.CommonAxisColumn) != check:
+                item.setCheckState(item.CommonAxisColumn, check)
+
+    def layout_digital_strip(self, plot):
+        """Jedem Signal eines Digitalstrips sein eigenes Band geben.
+
+        Umgesetzt ueber den Wertebereich: jedes Signal bekommt einen
+        Bereich, der das Vielfache seiner eigenen Spanne umfasst und um
+        sein Band verschoben ist. Dadurch zeichnet asammdf die Kurven
+        uebereinander statt ineinander.
+        """
+        if not getattr(plot, "digital_mode", False):
+            return
+
+        tree = getattr(plot, "channel_list", None)
+        if tree is None:
+            return
+
+        uuids = []
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() == ChannelsTreeItem.Channel and item.signal.enable:
+                uuids.append(item.uuid)
+
+        count = len(uuids)
+        if not count:
+            return
+
+        # Anteil der Bandhoehe, den die Kurve ausfuellt: 1 / 1.25 = 80 %
+        spread = 1.25
+
+        # Der erste Eintrag der Liste gehoert nach oben, also von unten
+        # her durchzaehlen.
+        bands = {}
+        for position, uuid in enumerate(reversed(uuids)):
+            try:
+                signal, _index = plot.signal_by_uuid(uuid)
+            except KeyError:
+                continue
+
+            if signal.empty or signal.min == "n.a." or signal.max == "n.a.":
+                continue
+
+            minimum, maximum = float(signal.min), float(signal.max)
+
+            if minimum == maximum:
+                minimum, maximum = minimum - 0.5, maximum + 0.5
+
+            span = maximum - minimum
+            dim = span * spread
+            bottom = minimum - (dim - span) / 2
+            top = bottom + dim * count
+
+            bands[uuid] = (bottom - dim * position, top - dim * position)
+
+        if not bands:
+            return
+
+        def apply_bands():
+            for uuid, y_range in bands.items():
+                try:
+                    signal, _index = plot.signal_by_uuid(uuid)
+                except KeyError:
+                    continue
+
+                was_locked = signal.y_locked
+                signal.y_locked = False
+                signal.y_range = y_range
+                signal.y_locked = was_locked
+
+        apply_bands()
+
+        if plot.current_uuid in bands:
+            # Achse UND Zeichenflaeche stumm schalten: beide schreiben den
+            # neuen Bereich sonst auf die Signale zurueck.
+            plot.y_axis.blockSignals(True)
+            plot.viewbox.blockSignals(True)
+            try:
+                plot.viewbox.setYRange(*bands[plot.current_uuid], padding=0)
+            finally:
+                plot.viewbox.blockSignals(False)
+                plot.y_axis.blockSignals(False)
+
+        # noch einmal setzen, falls doch etwas dazwischengefunkt hat
+        apply_bands()
+
+        plot.update()
 
     def _strip_button_clicked(self, name, plot):
         """Einer der vier Umschaltknoepfe in der Reihe eines Strips."""
@@ -2818,7 +3252,12 @@ class Plot(QtWidgets.QWidget):
         many = len(self.strips) > 1
         for i, plot in enumerate(self.strips, 1):
             label = getattr(plot, "strip_label", None)
-            if label is not None:
+            if label is None:
+                continue
+
+            if getattr(plot, "digital_mode", False):
+                label.setText(f"Strip {i} (digital)" if many else "digital")
+            else:
                 label.setText(f"Strip {i}" if many else "")
 
     def _wire_channel_list(self, tree, plot):
@@ -3128,6 +3567,7 @@ class Plot(QtWidgets.QWidget):
                 except KeyError:
                     return
                 strip.set_signal_enable(item.uuid, item.checkState(column))
+                self.layout_digital_strip(strip)
             if not enabled and tree.hide_disabled_channels:
                 item.setHidden(True)
 
@@ -3193,6 +3633,7 @@ class Plot(QtWidgets.QWidget):
 
         for strip, uuids in by_strip.values():
             strip.delete_channels(uuids)
+            self.layout_digital_strip(strip)
 
         if self.info_uuid in deleted:
             self.info_uuid = None
@@ -3458,16 +3899,147 @@ class Plot(QtWidgets.QWidget):
             e.accept()
         super().dragEnterEvent(e)
 
-    def dropEvent(self, e):
-        if e.source() in self.channel_lists():
-            super().dropEvent(e)
+    # Haltezeit in Millisekunden, bis das Auswahlfeld erscheint
+    STRIP_DROP_DWELL = 350
+
+    def strip_at(self, global_position):
+        """Welcher Strip liegt unter dieser Bildschirmposition?"""
+        for strip in self.strips:
+            if strip.rect().contains(strip.mapFromGlobal(global_position)):
+                return strip
+
+            tree = getattr(strip, "channel_list", None)
+            if tree is not None and tree.rect().contains(tree.mapFromGlobal(global_position)):
+                return strip
+
+        return None
+
+    def strip_hint(self):
+        hint = getattr(self, "_strip_hint", None)
+
+        if hint is None:
+            hint = self._strip_hint = StripDropHint(self)
+
+        return hint
+
+    def _strip_hint_timer(self):
+        """Zeitgeber, damit das Feld auch bei voellig ruhiger Maus kommt.
+
+        Ohne ihn muesste man wackeln: Qt schickt waehrend des Ziehens
+        nur dann Ereignisse, wenn sich die Maus bewegt.
+        """
+        timer = getattr(self, "_hint_timer", None)
+
+        if timer is None:
+            timer = self._hint_timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.show_strip_hint)
+
+        return timer
+
+    def show_strip_hint(self):
+        strip = self._drag_dwell_strip
+
+        if strip is None or strip not in self.strips:
+            return
+
+        hint = self.strip_hint()
+        if hint.isVisible():
+            return
+
+        if len(self.strips) > 1:
+            middle = f"Add to strip {self.strips.index(strip) + 1}"
         else:
-            data = e.mimeData()
-            if data.hasFormat("application/octet-stream-asammdf"):
-                names = extract_mime_names(data)
-                self.add_channels_request.emit(names)
+            middle = "Add to this strip"
+
+        hint.show_for(QtGui.QCursor.pos(), middle)
+
+    def strip_hint_update(self, strip, position):
+        """Verweildauer verfolgen und das Auswahlfeld fuehren."""
+        hint = self.strip_hint()
+
+        if strip is None:
+            self.strip_hint_hide()
+            return
+
+        if hint.isVisible():
+            hint.update_choice(QtGui.QCursor.pos())
+            return
+
+        moved = self._drag_dwell_pos is None or (position - self._drag_dwell_pos).manhattanLength() > 6
+
+        if strip is not self._drag_dwell_strip or moved:
+            self._drag_dwell_strip = strip
+            self._drag_dwell_pos = position
+            self._drag_dwell_start = perf_counter()
+            self._strip_hint_timer().start(self.STRIP_DROP_DWELL)
+
+        elif perf_counter() - self._drag_dwell_start >= self.STRIP_DROP_DWELL / 1000:
+            # Rueckfall, falls der Zeitgeber waehrend des Ziehens nicht
+            # zum Zug kommt
+            self.show_strip_hint()
+
+    def strip_hint_hide(self):
+        timer = getattr(self, "_hint_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        hint = getattr(self, "_strip_hint", None)
+        if hint is not None:
+            hint.hide()
+
+        self._drag_dwell_strip = None
+        self._drag_dwell_pos = None
+        self._drag_dwell_start = 0.0
+
+    def strip_hint_take(self):
+        """Gewaehlte Richtung abholen: -1 darueber, 0 hier, +1 darunter."""
+        hint = getattr(self, "_strip_hint", None)
+        choice = 1
+
+        if hint is not None and hint.isVisible():
+            choice = hint.update_choice(QtGui.QCursor.pos())
+
+        self.strip_hint_hide()
+
+        return choice - 1
+
+    def dragMoveEvent(self, e):
+        self.strip_hint_update(self.strip_at(QtGui.QCursor.pos()), e.position().toPoint())
+        e.accept()
+
+    def dragLeaveEvent(self, e):
+        self.strip_hint_hide()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        strip = self.strip_at(QtGui.QCursor.pos())
+        offset = self.strip_hint_take()
+
+        source = e.source()
+
+        # Zug aus einer eigenen Kanalliste auf eine Zeichenflaeche: der
+        # Abwurf landet hier, nicht bei der Zeichenflaeche. Ohne diesen
+        # Zweig wuerde er wirkungslos verpuffen.
+        if source in self.channel_lists():
+            if self.drop_from_own_list(source, strip, offset):
+                e.accept()
             else:
-                e.ignore()
+                super().dropEvent(e)
+            return
+
+        if strip is not None:
+            self.set_active_strip(strip)
+
+            if offset:
+                self.schedule_strip_choice(strip, offset)
+
+        data = e.mimeData()
+        if data.hasFormat("application/octet-stream-asammdf"):
+            names = extract_mime_names(data)
+            self.add_channels_request.emit(names)
+        else:
+            e.ignore()
 
     def flash_curve(self, item, column):
         if self.plot.cursor1:
@@ -4264,6 +4836,7 @@ class Plot(QtWidgets.QWidget):
             "channels": all_strips_to_config() if not self.pattern else [],
             "strip_count": len(self.strips),
             "strip_sizes": [int(e) for e in self.strip_splitter.sizes()],
+            "strip_digital": [bool(getattr(strip, "digital_mode", False)) for strip in self.strips],
             "pattern": self.pattern,
             "splitter": [int(e) for e in self.splitter.sizes()[:2]]
             + [
@@ -4284,6 +4857,13 @@ class Plot(QtWidgets.QWidget):
                 [self.channel_selection.columnWidth(i) for i in range(self.channel_selection.columnCount())],
             ],
             "channels_header_sizes": [self.splitter.sizes()[0], self.channel_selection.header_sizes()],
+            # Spaltenbreiten je Strip - die Zeile darueber kennt nur die
+            # Liste des aktiven Strips und bleibt fuer aeltere Versionen.
+            "strip_header_sizes": [
+                strip.channel_list.header_sizes()
+                for strip in self.strips
+                if getattr(strip, "channel_list", None) is not None
+            ],
             "channels_header_columns_visible": [
                 not self.channel_selection.isColumnHidden(i)
                 for i in range(self.channel_selection.columnCount())
@@ -4543,7 +5123,10 @@ class PlotGraphics(pg.PlotWidget):
         self.initial_x_range = "adjust"
         super().__init__(viewBox=viewBox)
 
-        self.plotItem.vb.setLeftButtonAction(Plot.mouse_mode)
+        # Die Klassenvorgabe hat die gemerkte Einstellung ueberschrieben.
+        self.plotItem.vb.setLeftButtonAction(
+            QtCore.QSettings().value("plot/mouse_mode", Plot.mouse_mode, str)
+        )
 
         self.lock = Lock()
 
@@ -4579,6 +5162,7 @@ class PlotGraphics(pg.PlotWidget):
         self.with_dots = with_dots
 
         self.current_uuid = None
+        self.digital_mode = False
 
         self.standalone = kwargs.get("standalone", False)
 
@@ -5191,6 +5775,7 @@ class PlotGraphics(pg.PlotWidget):
     def dragEnterEvent(self, e):
         if e.mimeData().hasFormat("application/octet-stream-asammdf"):
             e.accept()
+
         super().dragEnterEvent(e)
 
     def draw_grids(self, paint, viewbox_rect, ratio):
@@ -5239,15 +5824,19 @@ class PlotGraphics(pg.PlotWidget):
         return self._grid_pixmap
 
     def dropEvent(self, e):
+        parent = self.plot_parent
+
+        target = self
+
         # Der Strip, auf den fallen gelassen wird, wird der aktive -
         # sonst landen die Kanaele in irgendeinem anderen.
-        if self.plot_parent is not None and hasattr(self.plot_parent, "set_active_strip"):
-            self.plot_parent.set_active_strip(self)
+        if parent is not None and hasattr(parent, "set_active_strip"):
+            parent.set_active_strip(target)
 
         own_list = getattr(self, "channel_list", None)
-        if own_list is not None and e.source() is own_list:
+        if own_list is not None and e.source() is own_list and target is self:
             super().dropEvent(e)
-        elif self._moved_from_other_strip(e):
+        elif self._moved_from_other_strip(e, target):
             e.accept()
         else:
             data = e.mimeData()
@@ -5257,7 +5846,7 @@ class PlotGraphics(pg.PlotWidget):
             else:
                 e.ignore()
 
-    def _moved_from_other_strip(self, e):
+    def _moved_from_other_strip(self, e, target=None):
         """Zug aus einem anderen Strip desselben Fensters: verschieben.
 
         Liefert True, wenn der Umzug erledigt ist.
@@ -5270,7 +5859,7 @@ class PlotGraphics(pg.PlotWidget):
         if source not in parent.channel_lists():
             return False
 
-        return parent.move_signals_between_strips(source, self)
+        return parent.move_signals_between_strips(source, target or self)
 
     def edit_computation(self, item):
         signal = item.signal
@@ -6322,6 +6911,14 @@ class PlotGraphics(pg.PlotWidget):
                     paint.setPen(sig.pen)
 
                     pth = self.generatePath(x, y, sig)
+
+                    if self.digital_mode:
+                        fill = self.digital_fill_path(pth, sig, x)
+                        if fill is not None:
+                            color = QtGui.QColor(sig.color)
+                            color.setAlpha(110)
+                            paint.fillPath(fill, color)
+
                     paint.drawPath(pth)
 
                     if with_dots:
@@ -6634,6 +7231,34 @@ class PlotGraphics(pg.PlotWidget):
                     self.region.lines[i].pen.setStyle(QtCore.Qt.PenStyle.SolidLine)
         if self.region.moving_cursor is not None:
             self.cursor1.setPos(self.region.moving_cursor.pos())
+
+    def digital_fill_path(self, path, sig, x):
+        """Treppenkurve bis zur Grundlinie schliessen, damit sie fuellbar wird.
+
+        Im Digitalfenster zaehlt die Flaeche, nicht die Linie - ein
+        schmaler Puls ist als Strich kaum zu sehen.
+        """
+        if not self.py or sig.y_range is None or len(x) < 2:
+            return None
+
+        try:
+            y_low, y_high = (float(e) for e in sig.y_range)
+            minimum = float(sig.min)
+        except (TypeError, ValueError):
+            return None
+
+        y_scale = (y_high - y_low) / float(self.py)
+        if not y_scale:
+            return None
+
+        baseline = (y_high + y_scale - minimum) / y_scale
+
+        fill = QtGui.QPainterPath(path)
+        fill.lineTo(float(x[-1]), baseline)
+        fill.lineTo(float(x[0]), baseline)
+        fill.closeSubpath()
+
+        return fill
 
     def scale_curve_to_pixmap(self, x, y, y_range, x_start):
         if self.py:
