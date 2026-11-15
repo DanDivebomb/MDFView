@@ -28,6 +28,26 @@ from .file import FileWidget
 from .mdi_area import get_functions, MdiAreaWidget, WithMDIArea
 from .plot import Plot
 from ..mdfview_paths import remember_folder, start_folder
+
+# Eigener Name und eigene Zaehlung - damit niemand diesen Zweig mit
+# dem Original verwechselt. libversion bleibt die asammdf-Version
+# darunter und steht weiterhin im Info-Fenster.
+MDFVIEW_VERSION = "1.0.0"
+
+
+def mdfview_icon():
+    """Programmsymbol. Liegt als Datei neben den Qt-Ressourcen.
+
+    Nicht in resource_rc.py eingebacken: so laesst es sich
+    austauschen, ohne die Ressourcen neu zu uebersetzen.
+    """
+    path = Path(__file__).resolve().parent.parent / "ui" / "images" / "mdfview.png"
+
+    icon = QtGui.QIcon()
+    if path.is_file():
+        icon.addFile(str(path))
+
+    return icon
 from ..mdfview_theme import DARK_INDICATOR_STYLE
 
 
@@ -36,6 +56,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         super(Ui_PyMDFMainWindow, self).__init__(*args, **kwargs)
         WithMDIArea.__init__(self, comparison=True)
         self.setupUi(self)
+        self.setWindowIcon(mdfview_icon())
         self._settings = QtCore.QSettings()
         self._settings.setValue("interface/current_theme", self._settings.value("interface/theme", "Light"))
         self._light_palette = self.palette()
@@ -904,7 +925,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         menu.addActions(open_group.actions())
 
         self.with_dots = self._settings.value("plot/dots", False, type=bool)
-        self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Single files")
+        self.setWindowTitle(f"MDFView {MDFVIEW_VERSION} [PID={os.getpid()}] - Single files")
 
         self.set_subplot_option(self._settings.value("mdf/subwindows", "Disabled"))
         self.set_subplot_link_option(self._settings.value("mdf/subwindows_link", "Disabled"))
@@ -1647,13 +1668,13 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
     def mode_changed(self, index):
         if index == 0:
             self.plot_menu.setEnabled(True)
-            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Single files")
+            self.setWindowTitle(f"MDFView {MDFVIEW_VERSION} [PID={os.getpid()}] - Single files")
         elif index == 1:
             self.plot_menu.setEnabled(False)
-            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Batch processing")
+            self.setWindowTitle(f"MDFView {MDFVIEW_VERSION} [PID={os.getpid()}] - Batch processing")
         elif index == 2:
             self.plot_menu.setEnabled(True)
-            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Comparison")
+            self.setWindowTitle(f"MDFView {MDFVIEW_VERSION} [PID={os.getpid()}] - Comparison")
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1912,13 +1933,14 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         MessageBox.about(
             self,
             "About asammdf-gui",
-            f"""Graphical user interface for the asammdf package
+            f"""MDFView - graphical user interface built on the asammdf package
 
 * * *
 
 Build information:
 
-*   version {libversion}
+*   MDFView {MDFVIEW_VERSION}
+*   asammdf {libversion}
 *   PySide6 {pyside6_version}
 *   CPython {cpython}
 

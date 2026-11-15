@@ -28,7 +28,7 @@ def main(measurements=None):
     from PySide6 import QtCore, QtWidgets
 
     from asammdf.gui.utils import excepthook, set_app_user_model_id
-    from asammdf.gui.widgets.main import MainWindow
+    from asammdf.gui.widgets.main import MainWindow, mdfview_icon
     from asammdf.gui.widgets.plot import monkey_patch_pyqtgraph
 
     sys.excepthook = excepthook
@@ -42,6 +42,7 @@ def main(measurements=None):
     app.setOrganizationDomain("py-asammdf")
     app.setApplicationName("py-asammdf")
     set_app_user_model_id("py-asammdf")
+    app.setWindowIcon(mdfview_icon())
 
     if args.reset:
         QtCore.QSettings().clear()

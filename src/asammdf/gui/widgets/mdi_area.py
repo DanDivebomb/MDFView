@@ -50,6 +50,7 @@ from .flexray_bus_trace import FlexRayBusTrace
 from .gps import GPS
 from .lin_bus_trace import LINBusTrace
 from .numeric import Numeric
+from .numeric_scalar import NumericScalar
 from .plot import Plot
 from .tabular import Tabular
 from .xy import XY
@@ -1030,7 +1031,11 @@ class MdiAreaWidget(MdiAreaMixin, QtWidgets.QMdiArea):
             data = event.mimeData()
             if data.hasFormat("application/octet-stream-asammdf"):
                 dialog = WindowSelectionDialog(
-                    options=(("Plot", "Numeric") if self.comparison else ("Plot", "Numeric", "Tabular")),
+                    options=(
+                        ("Plot", "Numeric")
+                        if self.comparison
+                        else ("Plot", "Numeric", "Numeric scalar", "Tabular")
+                    ),
                     parent=self,
                 )
                 dialog.setModal(True)
@@ -1390,7 +1395,7 @@ class WithMDIArea:
 
                 widget.add_new_channels(signals)
 
-            elif isinstance(widget, Numeric):
+            elif isinstance(widget, (Numeric, NumericScalar)):
                 signals = []
 
                 for uuid in uuids:
@@ -1741,6 +1746,8 @@ class WithMDIArea:
                 target = self._add_plot_window
             elif window_type == "Numeric":
                 target = self._add_numeric_window
+            elif window_type == "Numeric scalar":
+                target = partial(self._add_numeric_window, scalar=True)
             elif window_type == "Tabular":
                 target = self._add_tabular_window
             elif window_type == "XY":
@@ -2590,7 +2597,7 @@ class WithMDIArea:
 
         return trace
 
-    def _add_numeric_window(self, names):
+    def _add_numeric_window(self, names, scalar=False):
         if names and isinstance(names[0], str):
             signals_ = [
                 (
@@ -2725,7 +2732,10 @@ class WithMDIArea:
 
             signals = natsorted(signals, key=lambda x: x.name)
 
-        numeric = Numeric([], parent=self, mode="offline", owner=self)
+        if scalar:
+            numeric = NumericScalar([], parent=self, owner=self)
+        else:
+            numeric = Numeric([], parent=self, mode="offline", owner=self)
 
         numeric.show()
         numeric.hide()
@@ -2755,7 +2765,7 @@ class WithMDIArea:
         if self._frameless_windows:
             w.setWindowFlags(w.windowFlags() | QtCore.Qt.WindowType.FramelessWindowHint)
 
-        w.setWindowTitle(generate_window_title(w, "Numeric"))
+        w.setWindowTitle(generate_window_title(w, "Numeric scalar" if scalar else "Numeric"))
 
         numeric.add_channels_request.connect(partial(self.add_new_channels, widget=numeric))
         if self.subplots_link:
@@ -3562,6 +3572,7 @@ class WithMDIArea:
         else:
             functions = {
                 "Numeric": self._load_numeric_window,
+                "Numeric scalar": partial(self._load_numeric_window, scalar=True),
                 "Plot": self._load_plot_window,
                 "GPS": self._load_gps_window,
                 "Tabular": self._load_tabular_window,
@@ -3594,7 +3605,7 @@ class WithMDIArea:
 
                 self.windows_modified.emit()
 
-    def _load_numeric_window(self, window_info):
+    def _load_numeric_window(self, window_info, scalar=False):
         geometry = window_info.get("geometry", None)
 
         # patterns
@@ -3691,14 +3702,24 @@ class WithMDIArea:
 
             signals.sort(key=lambda x: (x.name, x.origin_uuid))
 
-        numeric = Numeric(
-            [],
-            format=window_info["configuration"]["format"],
-            float_precision=window_info["configuration"].get("float_precision", 3),
-            parent=self,
-            mode="offline",
-            owner=self,
-        )
+        if scalar:
+            numeric = NumericScalar(
+                [],
+                format=window_info["configuration"]["format"],
+                float_precision=window_info["configuration"].get("float_precision", 3),
+                name_width=window_info["configuration"].get("name_width"),
+                parent=self,
+                owner=self,
+            )
+        else:
+            numeric = Numeric(
+                [],
+                format=window_info["configuration"]["format"],
+                float_precision=window_info["configuration"].get("float_precision", 3),
+                parent=self,
+                mode="offline",
+                owner=self,
+            )
         numeric.pattern = pattern_info
 
         sub = MdiSubWindow(parent=self)
@@ -3737,6 +3758,10 @@ class WithMDIArea:
 
         if self.subplots_link:
             numeric.timestamp_changed_signal.connect(self.set_cursor)
+
+        if scalar:
+            # alles Weitere betrifft nur die Tabellenansicht
+            return w, pattern_info
 
         sections_width = window_info["configuration"].get("header_sections_width", [])
         if sections_width:
@@ -4781,7 +4806,14 @@ class WithMDIArea:
 
         for mdi in self.mdi_area.subWindowList():
             wid = mdi.widget()
-            if isinstance(wid, Plot) and wid is not widget:
+            if isinstance(wid, NumericScalar):
+                # Zwei Cursor: angezeigt wird der erste
+                try:
+                    wid.set_region(region)
+                except:
+                    print(format_exc())
+
+            elif isinstance(wid, Plot) and wid is not widget:
                 try:
                     if wid.plot.region is None:
                         event = QtGui.QKeyEvent(
@@ -4924,7 +4956,10 @@ class WithMDIArea:
             self._region_source = widget
             for mdi in self.mdi_area.subWindowList():
                 plt = mdi.widget()
-                if isinstance(plt, Plot) and plt is not widget:
+                if isinstance(plt, NumericScalar):
+                    # wieder dem Cursor folgen
+                    plt.clear_region()
+                elif isinstance(plt, Plot) and plt is not widget:
                     if plt.plot.region is not None:
                         event = QtGui.QKeyEvent(
                             QtCore.QEvent.Type.KeyPress,

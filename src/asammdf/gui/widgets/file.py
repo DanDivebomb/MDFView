@@ -61,6 +61,7 @@ from .gps import GPS
 from .lin_bus_trace import LINBusTrace
 from .mdi_area import get_functions, MdiAreaWidget, WithMDIArea
 from .numeric import Numeric
+from .numeric_scalar import NumericScalar
 from .plot import Plot
 from .tabular import Tabular
 from .tree import add_children
@@ -982,6 +983,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     options = [
                         "New plot window",
                         "New numeric window",
+                        "New numeric scalar window",
                         "New tabular window",
                     ] + [
                         mdi.windowTitle()
@@ -1030,6 +1032,8 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                             self.add_window(["Plot", signals, True])
                         elif window_type == "New numeric window":
                             self.add_window(["Numeric", signals, True])
+                        elif window_type == "New numeric scalar window":
+                            self.add_window(["Numeric scalar", signals, True])
                         elif window_type == "New tabular window":
                             self.add_window(["Tabular", signals, True])
                         else:
@@ -1096,7 +1100,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 "minimized": window.isMinimized() if not check_save else False,
                 "tab": page_index,
             }
-            if isinstance(wid, Numeric):
+            if isinstance(wid, NumericScalar):
+                window_config["type"] = "Numeric scalar"
+            elif isinstance(wid, Numeric):
                 window_config["type"] = "Numeric"
             elif isinstance(wid, Plot):
                 window_config["type"] = "Plot"
@@ -2140,6 +2146,7 @@ MultiRasterSeparator;&
                 options=(
                     "Plot",
                     "Numeric",
+                    "Numeric scalar",
                     "Tabular",
                     "CAN Bus Trace",
                     "FlexRay Bus Trace",
