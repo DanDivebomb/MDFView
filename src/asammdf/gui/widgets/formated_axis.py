@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from math import ceil
+import os
 from traceback import format_exc
 
 import numpy as np
@@ -11,6 +12,25 @@ from pyqtgraph.Point import Point
 from PySide6 import QtCore, QtGui, QtWidgets
 
 LOCAL_TIMEZONE = datetime.now(timezone.utc).astimezone().tzinfo
+
+# Ablaufverfolgung fuer die Achsenbeschriftung. Einschalten mit der
+# Umgebungsvariablen MDFVIEW_DEBUG_AXIS=1, dann schreibt jede Achse in
+# die Konsole, was sie tut.
+AXIS_DEBUG = bool(os.environ.get("MDFVIEW_DEBUG_AXIS"))
+
+# Abstand, den die Beschriftung an den Enden der Achse frei laesst.
+# Zum Ausprobieren ueber MDFVIEW_AXIS_MARGIN verstellbar.
+AXIS_LABEL_MARGIN = int(os.environ.get("MDFVIEW_AXIS_MARGIN", "8"))
+
+
+def axis_log(*parts):
+    if AXIS_DEBUG:
+        print("[achse]", *parts, flush=True)
+
+
+if AXIS_DEBUG:
+    print("[achse] Modul geladen aus", __file__, flush=True)
+
 # Breite des Greifbereichs am inneren Rand der Skala
 WIDTH_HANDLE = 6
 
@@ -48,11 +68,30 @@ class FormatedAxis(pg.AxisItem):
 
         self.locked = kwargs.pop("locked", False)
 
+        # Ungekuerzte Beschriftung. pyqtgraph ruft setLabel bereits im
+        # Konstruktor auf, wenn text= uebergeben wurde - das darf hier
+        # nicht wieder weggeworfen werden.
+        self.full_label = getattr(self, "full_label", "") or self.labelText or ""
+        self._fitting = False
+
+        # Beim Groessenereignis ist die Zeichenflaeche noch nicht neu
+        # vermessen - erst einen Durchlauf spaeter stimmen ihre Werte.
+        self._fit_timer = QtCore.QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self.refit_label)
+
         if self.orientation in ("left", "right"):
             # Die Knoepfe + und - entfallen: die Breite zieht man am
             # inneren Rand der Skala. Die Felder bleiben auf None, damit
             # der restliche Code sie weiter abfragen kann.
             self.setWidth(48)
+
+        # pyqtgraph haengt der Beschriftung sonst einen Hinweis auf den
+        # SI-Vorsatz an, etwa "(x1000)". Die Achse zeigt hier die
+        # Rohwerte, der Zusatz waere also schlicht falsch - und er
+        # entsteht erst beim Zeichnen, laeuft damit ueber die vorher
+        # berechnete Laenge hinaus und wird abgeschnitten.
+        self.enableAutoSIPrefix(False)
 
         self.set_pen(self._pen)
 
@@ -63,8 +102,11 @@ class FormatedAxis(pg.AxisItem):
         self.setWidth(self.tick_width() - 10)
 
     def setWidth(self, w=None):
-        if self.orientation in ("left", "right"):
-            super().setWidth(max(w, 48))
+        if w is not None and self.orientation in ("left", "right"):
+            # Untergrenze gilt nur noch fuer die Zahlen. Frueher standen
+            # hier 48 Punkte, weil die Beschriftung in dieser Breite mit
+            # drin lag - sie bekommt jetzt ihren eigenen Platz daneben.
+            super().setWidth(max(w, 10))
         else:
             super().setWidth(w)
 
@@ -85,7 +127,9 @@ class FormatedAxis(pg.AxisItem):
         if self.fixedWidth is None or not self.isVisible() or not self.label.isVisible():
             return
 
-        width = self.fixedWidth + int(self.label.boundingRect().height() * 0.8)
+        # Volle Hoehe statt pyqtgraphs 0.8: der Faktor ist dort als
+        # Ueberschlag gedacht und schneidet hohe Zeichen wie [ und ] an.
+        width = self.fixedWidth + int(self.label.boundingRect().height()) + 2
 
         self.setMaximumWidth(width)
         self.setMinimumWidth(width)
@@ -234,10 +278,143 @@ class FormatedAxis(pg.AxisItem):
 
         return [val[:80] for val in strns]
 
+    def label_width(self, text):
+        """Laenge der Beschriftung in Bildpunkten, so wie sie gezeichnet wird.
+
+        Nicht die reine Schriftbreite - gezeichnet wird als HTML, und das
+        kostet Rand.
+        """
+        style = ";".join(f"{key}: {value}" for key, value in (self.labelStyle or {}).items())
+
+        document = QtGui.QTextDocument()
+        document.setDefaultFont(self.label.font())
+        document.setHtml(f"<span style='{style}'>{text}</span>")
+
+        return document.idealWidth()
+
+    def label_candidates(self, text, room):
+        """Fassungen der Beschriftung, von lang nach kurz."""
+        yield text
+
+        base = text
+
+        # Einheit in eckigen Klammern am Ende opfern, der Name zaehlt mehr
+        if text.endswith("]") and " [" in text:
+            base = text[: text.rindex(" [")]
+            yield base
+
+        metrics = QtGui.QFontMetrics(self.label.font())
+        width = max(int(room - self.label_width("")), 24)
+
+        while width >= 24:
+            yield metrics.elidedText(base, QtCore.Qt.TextElideMode.ElideRight, width)
+            width -= 8
+
+    def label_span(self):
+        """Der Bereich laengs der Achse, in dem die Beschriftung stehen darf.
+
+        Das ist die Zeichenflaeche, nicht die Achse: die Achse reicht
+        darueber hinaus, unten bis in die Zeitskala. Mittig zur Achse
+        heisst deshalb zu tief, und oben bleibt Platz liegen.
+        """
+        view = self.linkedView()
+
+        if view is not None:
+            try:
+                rect = self.mapRectFromItem(view, view.boundingRect())
+            except Exception:
+                rect = None
+
+            if rect is not None and rect.height() > 20:
+                return float(rect.top()), float(rect.bottom())
+
+        return 0.0, float(self.height())
+
+    def place_label(self, oben, unten):
+        """Beschriftung mittig in den nutzbaren Bereich setzen."""
+        breite = self.label.boundingRect().width()
+
+        pos = self.label.pos()
+        pos.setY((oben + unten) / 2 + breite / 2)
+        self.label.setPos(pos)
+
+    def refit_label(self):
+        """Beschriftung kuerzen, bis sie wirklich auf die Achse passt.
+
+        Die Beschriftung laeuft laengs der Achse. Was nicht hineinpasst,
+        schneidet Qt an BEIDEN Enden ab, weil der Text mittig sitzt -
+        vom Namen fehlt dann vorne wie hinten etwas.
+
+        Gemessen wird am gesetzten Text, nicht an einer Vorhersage:
+        gezeichnet wird HTML, und was pyqtgraph dabei noch anhaengt,
+        laesst sich von aussen nicht zuverlaessig abschaetzen.
+        """
+        marke = f"refit    id={id(self) % 10000} lage={self.orientation}"
+
+        if getattr(self, "_fitting", False):
+            axis_log(marke, "-> laeuft schon, uebersprungen")
+            return
+
+        # Falls die Beschriftung an setLabel vorbei gesetzt wurde, gilt
+        # der erste gesehene Text als der ungekuerzte.
+        if not getattr(self, "full_label", ""):
+            self.full_label = self.labelText or ""
+
+        text = self.full_label
+
+        if not text or self.orientation not in ("left", "right"):
+            axis_log(marke, f"-> nichts zu tun (text={text!r})")
+            return
+
+        # Nutzbar ist die Zeichenflaeche, nicht die Achse selbst - die
+        # reicht unten bis in die Zeitskala hinein.
+        oben, unten = self.label_span()
+        room = int(unten - oben) - AXIS_LABEL_MARGIN
+
+        # noch ohne brauchbare Groesse: der naechste Groessenwechsel kuerzt
+        if room < 30:
+            axis_log(marke, f"-> zu klein, hoehe={self.height():.0f} platz={room}")
+            return
+
+        self._fitting = True
+        try:
+            for candidate in self.label_candidates(text, room):
+                if candidate != self.labelText:
+                    self.labelText = candidate
+                    self.label.setHtml(self.labelString())
+                    self._adjustSize()
+
+                breite = self.label.boundingRect().width()
+                axis_log(marke, f"platz={room} probiert={candidate!r} breite={breite:.0f}")
+
+                if breite <= room:
+                    break
+
+            # pyqtgraph setzt die Beschriftung nur beim Aendern der
+            # Achsengroesse wieder mittig, nicht beim Aendern des Textes
+            super().resizeEvent(None)
+            self.place_label(oben, unten)
+
+            self.picture = None
+            self.update()
+
+            if AXIS_DEBUG:
+                breite = self.label.boundingRect().width()
+                fuss = self.label.pos().y()
+                axis_log(
+                    marke,
+                    f"fertig text={self.labelText!r} achse={self.height():.0f}",
+                    f"flaeche={oben:.0f}..{unten:.0f} text={fuss - breite:.0f}..{fuss:.0f}",
+                )
+        finally:
+            self._fitting = False
+
     def setLabel(self, text=None, units=None, unitPrefix=None, **args):
         """Override pyqtgraph.AxisItem.setLabel."""
         show_label = False
         if text is not None:
+            # ungekuerzt merken - gezeigt wird die passende Fassung
+            self.full_label = text
             self.labelText = text
             show_label = True
         if units is not None:
@@ -249,10 +426,21 @@ class FormatedAxis(pg.AxisItem):
             self.labelUnitPrefix = unitPrefix
         if len(args) > 0:
             self.labelStyle = args
+
+        axis_log(f"setLabel id={id(self) % 10000} lage={self.orientation}", repr(text), f"hoehe={self.height():.0f}")
+
         self.label.setHtml(self.labelString())
         self._adjustSize()
+        super().resizeEvent(None)
+
         self.picture = None
         self.update()
+
+        self.refit_label()
+
+        timer = getattr(self, "_fit_timer", None)
+        if timer is not None:
+            timer.start(0)
 
     def labelString(self):
         if self.labelUnits == "":
@@ -263,7 +451,9 @@ class FormatedAxis(pg.AxisItem):
         else:
             units = f"({self.labelUnitPrefix}{self.labelUnits})"
 
-        s = f"{self.labelText} {units}"
+        # ohne Einheit kein angehaengtes Leerzeichen - sonst sitzt die
+        # mittig ausgerichtete Beschriftung sichtbar daneben
+        s = f"{self.labelText} {units}" if units else self.labelText
         self._label_with_unit = s
 
         style = ";".join([f"{k}: {self.labelStyle[k]}" for k in self.labelStyle])
@@ -422,7 +612,22 @@ class FormatedAxis(pg.AxisItem):
 
                 self.plus.setPos(p)
 
-        return super().resizeEvent(ev)
+        result = super().resizeEvent(ev)
+
+        axis_log(f"resize   id={id(self) % 10000} lage={self.orientation} hoehe={self.height():.0f}")
+
+        # Die Beschriftung passt nur zu einer bestimmten Achsenhoehe -
+        # bei jeder Groessenaenderung neu kuerzen und mittig setzen.
+        # Aber erst, wenn auch die Zeichenflaeche ihre neue Groesse hat:
+        # an dieser Stelle liefert sie noch die alte, und daran gemessen
+        # wird der Text mal zu frueh, mal zu spaet gekuerzt.
+        timer = getattr(self, "_fit_timer", None)
+        if timer is not None:
+            timer.start(0)
+        else:
+            self.refit_label()
+
+        return result
 
     def close(self):
         self.linked_signal = None

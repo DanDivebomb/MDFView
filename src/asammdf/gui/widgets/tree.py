@@ -50,6 +50,32 @@ def set_channel_precision(name, precision):
             continue
 
 
+def moving_source(event, target_window):
+    """(Liste, Eintraege), wenn der Zug aus einem anderen Plotfenster kam.
+
+    Innerhalb eines Fensters wird laengst verschoben. Zwischen zwei
+    Fenstern entstehen die Kanaele im Ziel neu, also muessen sie in der
+    Quelle geloescht werden - sonst ist es eine Kopie.
+    """
+    source = event.source()
+    source_window = getattr(source, "plot", None)
+
+    if (
+        not isinstance(source, ChannelsTreeWidget)
+        or source_window is None
+        or source_window is target_window
+        or not getattr(source_window, "strips", None)
+    ):
+        return None
+
+    return source, validate_drag_items(source.invisibleRootItem(), source.selectedItems(), [])
+
+
+def signal_count(window):
+    """Wie viele Signale in allen Strips eines Plotfensters haengen."""
+    return sum(len(strip.signals) for strip in getattr(window, "strips", None) or [])
+
+
 def substitude_mime_uuids(mime, uuid=None, force=False, random_uuid=False):
     if not mime:
         return mime
@@ -714,12 +740,21 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                 self.update_channel_groups_count()
                 return
 
+            # Zug aus einem anderen Plotfenster: ebenfalls verschieben
+            moving = moving_source(e, window)
+
             data = e.mimeData()
             if data.hasFormat("application/octet-stream-asammdf"):
                 names = extract_mime_names(data)
                 self.drop_target = item
 
+                before = signal_count(window)
                 self.add_channels_request.emit(names)
+
+                if moving is not None and signal_count(window) > before:
+                    tree, items = moving
+                    tree.delete_items(items)
+
                 e.accept()
             else:
                 e.ignore()
@@ -792,6 +827,33 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
             iterator += 1
 
+    def delete_items(self, items):
+        """Kanaele aus der Liste werfen, wie mit der Entf-Taste.
+
+        Auch beim Verschieben in ein anderes Plotfenster gebraucht: dort
+        entstehen die Kanaele neu, hier muessen sie weg.
+        """
+        if not items:
+            return
+
+        deleted = list(set(get_data(self.plot, items, uuids_only=True)))
+
+        self.setUpdatesEnabled(False)
+        self.clearSelection()
+
+        root = self.invisibleRootItem()
+
+        for item in items:
+            (item.parent() or root).removeChild(item)
+
+        self.setUpdatesEnabled(True)
+        self.refresh()
+
+        if deleted:
+            self.itemsDeleted.emit(deleted)
+
+        self.update_channel_groups_count()
+
     def keyPressEvent(self, event):
         key = event.key()
         modifiers = event.modifiers()
@@ -802,23 +864,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         if key == QtCore.Qt.Key.Key_Delete and self.can_delete_items:
             event.accept()
-            selected_items = self.selectedItems()
-            deleted = list(set(get_data(self.plot, selected_items, uuids_only=True)))
-
-            self.setUpdatesEnabled(False)
-            self.clearSelection()
-
-            root = self.invisibleRootItem()
-
-            for item in selected_items:
-                (item.parent() or root).removeChild(item)
-
-            self.setUpdatesEnabled(True)
-            self.refresh()
-
-            if deleted:
-                self.itemsDeleted.emit(deleted)
-            self.update_channel_groups_count()
+            self.delete_items(self.selectedItems())
 
         elif key == QtCore.Qt.Key.Key_Insert and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             event.accept()

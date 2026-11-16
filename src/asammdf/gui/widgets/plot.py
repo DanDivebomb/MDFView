@@ -128,13 +128,28 @@ from .channel_stats import ChannelStats
 from .cursor import Bookmark, Cursor, Region
 from .dict_to_tree import ComputedChannelInfoWindow
 from .formated_axis import FormatedAxis
-from .tree import CHANNEL_PRECISION, ChannelsTreeItem, ChannelsTreeWidget, validate_drag_items
+from .tree import (
+    CHANNEL_PRECISION,
+    ChannelsTreeItem,
+    ChannelsTreeWidget,
+    moving_source,
+    signal_count,
+    validate_drag_items,
+)
 
 bin_ = bin
 
 HERE = Path(__file__).resolve().parent
 
 NOT_FOUND = 0xFFFFFFFF
+
+# Hoehe der Knopfreihe eines Strips. Der Spaltenkopf der Kanalliste
+# bekommt dieselbe, damit beide Spalten gleich hoch anfangen.
+STRIP_BAR_HEIGHT = 26
+
+# Ablaufverfolgung der Strip-Geometrie, einschalten mit
+# MDFVIEW_DEBUG_STRIPS=1
+STRIP_DEBUG = bool(os.environ.get("MDFVIEW_DEBUG_STRIPS"))
 
 
 def second_cursor_color(color):
@@ -260,14 +275,19 @@ class StripDropHint(QtWidgets.QWidget):
 
 
 class TimevaseOverview(QtWidgets.QWidget):
+    # Neuer sichtbarer Zeitbereich, wenn der Benutzer die Leiste schiebt
+    range_moved = QtCore.Signal(float, float)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setFixedHeight(16)
         self.setMouseTracking(False)
+        self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Ausschnitt verschieben: ziehen oder klicken")
 
         self._x_range = (0, 1)
         self._timebase = None
+        self._drag_offset = None
 
     @property
     def x_range(self):
@@ -286,6 +306,92 @@ class TimevaseOverview(QtWidgets.QWidget):
     def timebase(self, value):
         self._timebase = sorted(value)
         self.update()
+
+    def span(self):
+        """Gesamter dargestellter Zeitbereich und die nutzbare Breite.
+
+        Die Leiste zeigt immer alles, was es gibt: die Messdauer und,
+        falls man darueber hinaus gescrollt hat, auch den sichtbaren
+        Bereich. Gibt (Anfang, Ende, Breite) zurueck oder None.
+        """
+        if self.timebase is None:
+            return None
+
+        width = self.geometry().width() - 2
+        if width < 3:
+            return None
+
+        alles = sorted([*self.x_range, *self.timebase])
+        anfang, ende = alles[0], alles[-1]
+
+        if ende <= anfang:
+            return None
+
+        return anfang, ende, width
+
+    def time_at(self, x):
+        """Zeitpunkt unter dem Mauszeiger."""
+        bereich = self.span()
+        if bereich is None:
+            return None
+
+        anfang, ende, width = bereich
+
+        return anfang + max(min((x - 1) / width, 1.0), 0.0) * (ende - anfang)
+
+    def move_to(self, mitte):
+        """Den sichtbaren Ausschnitt um diesen Zeitpunkt legen."""
+        bereich = self.span()
+        if bereich is None:
+            return
+
+        anfang, ende, _width = bereich
+        breite = self.x_range[1] - self.x_range[0]
+
+        if breite <= 0:
+            return
+
+        # Der Ausschnitt darf nicht ganz aus der Messung herauswandern.
+        links = max(min(mitte - breite / 2, ende - breite), anfang)
+
+        if abs(links - self.x_range[0]) < breite * 1e-4:
+            return
+
+        self.range_moved.emit(float(links), float(links + breite))
+
+    def mousePressEvent(self, event):
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+
+        zeit = self.time_at(event.position().x())
+        if zeit is None:
+            return
+
+        mitte = (self.x_range[0] + self.x_range[1]) / 2
+
+        # Innerhalb des blauen Felds mitnehmen, sonst dorthin springen.
+        if self.x_range[0] <= zeit <= self.x_range[1]:
+            self._drag_offset = zeit - mitte
+        else:
+            self._drag_offset = 0.0
+            self.move_to(zeit)
+
+        self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is None:
+            super().mouseMoveEvent(event)
+            return
+
+        zeit = self.time_at(event.position().x())
+        if zeit is not None:
+            self.move_to(zeit - self._drag_offset)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         rect = self.geometry()
@@ -1859,10 +1965,15 @@ class Plot(QtWidgets.QWidget):
         # ein Panel mit eigener Knopfreihe - siehe _register_strip.
         vbox.addWidget(self.list_splitter)
 
+        # Die Zeitanzeige steht unter der Kanalliste und damit genau
+        # links neben der Zeitachse, die nur noch der unterste Strip
+        # zeigt. align_columns gibt ihr die Hoehe dieser Achse, damit
+        # Text und Achse auf einer Zeile liegen.
         vbox.addWidget(self.cursor_info)
+
         if timebase_overview:
             self.timebase_overview = TimevaseOverview()
-            vbox.addWidget(self.timebase_overview)
+            self.timebase_overview.range_moved.connect(self.move_x_range)
 
         self.range_proxy = pg.SignalProxy(self.plot.range_modified, rateLimit=16, slot=self.range_modified)
         # self.plot.range_modified.connect(self.range_modified)
@@ -1922,12 +2033,34 @@ class Plot(QtWidgets.QWidget):
         self.strip_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.strip_splitter.setOpaqueResize(False)
         self.strip_splitter.setHandleWidth(4)
-        self.strip_splitter.addWidget(self.plot)
+        self.strip_splitter.setChildrenCollapsible(False)
         self._register_strip(self.plot, self.channel_selection)
         self._wire_strip_region(self.plot)
+        self.strip_splitter.addWidget(self.plot.strip_panel)
         self.list_splitter.addWidget(self.plot.list_panel)
 
-        self.splitter.addWidget(self.strip_splitter)
+        # Die rechte Spalte bekommt oben und unten genau den Rand, den
+        # die linke durch ihre uebrigen Felder hat. Nur wenn beide
+        # Splitter gleich hoch sind UND an derselben Stelle beginnen,
+        # liegen die Zeilen auf einer Linie: gleiche Groessen allein
+        # genuegen nicht, weil ein Splitter uebrige Hoehe immer auf
+        # seine Felder verteilt - daher lief der Versatz nach unten hin
+        # auf, gemessen 3, 5, 12, 18, 26 Punkte.
+        self._left_pane = widget
+        self._strip_top_spacer = QtWidgets.QWidget()
+        self._strip_top_spacer.setFixedHeight(0)
+        self._strip_bottom_spacer = QtWidgets.QWidget()
+        self._strip_bottom_spacer.setFixedHeight(0)
+
+        right = QtWidgets.QWidget()
+        rbox = QtWidgets.QVBoxLayout(right)
+        rbox.setContentsMargins(0, 0, 0, 0)
+        rbox.setSpacing(0)
+        rbox.addWidget(self._strip_top_spacer)
+        rbox.addWidget(self.strip_splitter)
+        rbox.addWidget(self._strip_bottom_spacer)
+
+        self.splitter.addWidget(right)
 
         self.strip_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.strip_splitter))
         self.list_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.list_splitter))
@@ -1949,6 +2082,8 @@ class Plot(QtWidgets.QWidget):
         self.setAcceptDrops(True)
 
         main_layout.addWidget(self.splitter)
+        if self.timebase_overview is not None:
+            main_layout.addWidget(self.timebase_overview)
 
         self.show()
         size = sum(self.splitter.sizes())
@@ -2276,8 +2411,7 @@ class Plot(QtWidgets.QWidget):
             self.channel_selection.update_channel_groups_count()
             self.channel_selection.refresh()
 
-        if len(self.plot.all_timebase) and self.timebase_overview:
-            self.timebase_overview.timebase = self.plot.all_timebase[0], self.plot.all_timebase[-1]
+        self.update_timebase_overview()
 
         self.adjust_splitter(initial=initial)
         self.current_uuid_changed(self.plot.current_uuid)
@@ -2327,8 +2461,16 @@ class Plot(QtWidgets.QWidget):
         self._register_strip(plot, tree)
 
         self.strips.insert(index, plot)
-        self.strip_splitter.insertWidget(index, plot)
+        self.strip_splitter.insertWidget(index, plot.strip_panel)
         self.list_splitter.insertWidget(index, plot.list_panel)
+
+        # Lesezeichen des Fensters auch in den neuen Strip
+        source = self.plot
+        if source is not None and source is not plot and source.bookmarks:
+            plot.bookmarks = [bookmark.copy() for bookmark in source.bookmarks]
+
+            for bookmark in plot.bookmarks:
+                bookmark.visible = self.show_bookmarks
 
         self._relink_strips()
         self._equalize_strips()
@@ -2346,10 +2488,11 @@ class Plot(QtWidgets.QWidget):
         if tree is not None:
             tree.blockSignals(True)
 
-        panel = getattr(strip, "list_panel", None)
-        if panel is not None:
-            panel.setParent(None)
-            panel.deleteLater()
+        for name in ("list_panel", "strip_panel"):
+            panel = getattr(strip, name, None)
+            if panel is not None:
+                panel.setParent(None)
+                panel.deleteLater()
 
         strip.setParent(None)
         strip.close()
@@ -2371,7 +2514,7 @@ class Plot(QtWidgets.QWidget):
             return False
 
         self.strips.insert(new, self.strips.pop(old))
-        self.strip_splitter.insertWidget(new, strip)
+        self.strip_splitter.insertWidget(new, strip.strip_panel)
         self.list_splitter.insertWidget(new, strip.list_panel)
         self._relink_strips()
         return True
@@ -2402,6 +2545,230 @@ class Plot(QtWidgets.QWidget):
             if tree is not None:
                 tree.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
+    def move_x_range(self, start, stop):
+        """Alle Strips auf diesen Zeitbereich schieben.
+
+        Kommt von der Zeitleiste unten. Der erste Strip genuegt, die
+        anderen haengen ueber den x-Verbund daran.
+        """
+        if not getattr(self, "strips", None):
+            return
+
+        self.strips[0].viewbox.setXRange(start, stop, padding=0)
+
+    def update_timebase_overview(self):
+        """Die Zeitleiste unten auf die Messdauer ALLER Strips stellen.
+
+        Vorher zaehlte nur der gerade aktive Strip. War der beim Laden
+        noch leer - etwa weil die Kanaele erst danach auf die anderen
+        Strips verteilt wurden -, bekam die Leiste nie eine Zeitbasis
+        und blieb leer. Die gemeinsame Zeitbasis eines Strips wird
+        ausserdem nicht neu gerechnet, wenn ein Signal nachtraeglich in
+        ihn hineinwandert - deshalb zaehlen notfalls die Zeitstempel
+        der Signale selbst.
+        """
+        leiste = getattr(self, "timebase_overview", None)
+        if leiste is None:
+            return
+
+        anfang = ende = None
+
+        def merken(von, bis):
+            nonlocal anfang, ende
+            anfang = von if anfang is None else min(anfang, von)
+            ende = bis if ende is None else max(ende, bis)
+
+        for strip in getattr(self, "strips", None) or ():
+            timebase = getattr(strip, "all_timebase", None)
+
+            if timebase is not None and len(timebase):
+                merken(timebase[0], timebase[-1])
+                continue
+
+            for signal in getattr(strip, "signals", None) or ():
+                stempel = getattr(signal, "timestamps", None)
+                if stempel is not None and len(stempel):
+                    merken(stempel[0], stempel[-1])
+
+        if anfang is not None and ende > anfang:
+            leiste.timebase = anfang, ende
+
+    def _update_strip_axes(self):
+        """Die Zeitachse nur unter dem untersten Strip zeigen.
+
+        So macht es vSignalyzer: eine einzige Zeitskala in einem eigenen
+        Streifen ganz unten. Die Strips darueber gewinnen dadurch jeder
+        die Hoehe einer Achse an Zeichenflaeche. Versteckt man eine
+        Achse, setzt pyqtgraph ihre Hoehe selbst auf null - der Platz
+        verfaellt also nicht.
+        """
+        btn = getattr(self, "hide_axes_btn", None)
+        if not getattr(self, "strips", None) or btn is None:
+            return
+
+        versteckt = btn.isFlat()
+        letzter = self.strips[-1]
+
+        for strip in self.strips:
+            if versteckt or strip is not letzter:
+                strip.plotItem.hideAxis("bottom")
+            else:
+                strip.plotItem.showAxis("bottom")
+
+        # Jede Aktion bekommt ihr eigenes Nachmess-Budget.
+        self._column_passes = 0
+        self.align_columns()
+        self._schedule_column_sync()
+
+    def bottom_axis_height(self):
+        """Hoehe der einen Zeitachse unten - null, wenn keine da ist."""
+        if not getattr(self, "strips", None):
+            return 0
+
+        axis = getattr(self.strips[-1], "x_axis", None)
+        if axis is None or not axis.isVisible():
+            return 0
+
+        return int(axis.height())
+
+    def align_columns(self):
+        """Beide Spalten auf denselben senkrechten Ausschnitt bringen.
+
+        Links stehen ueber und unter den Listen noch andere Felder, die
+        rechte Spalte hat sie nicht. Dadurch sind die beiden Splitter
+        verschieden hoch, und dieselbe Groessenvorgabe ergibt
+        verschiedene Zeilenhoehen. Die Rahmen hier gleichen das aus.
+
+        Unten ist eine Besonderheit: dort sitzt rechts die Zeitachse des
+        untersten Strips, links die Zeitanzeige. Beide bekommen dieselbe
+        Hoehe und liegen damit auf einer Zeile - der Text steht links
+        neben der Achse, und keine Spalte laesst Platz frei, den die
+        andere gar nicht braucht.
+        """
+        pane = getattr(self, "_left_pane", None)
+        oben_spacer = getattr(self, "_strip_top_spacer", None)
+        unten_spacer = getattr(self, "_strip_bottom_spacer", None)
+
+        if pane is None or oben_spacer is None or unten_spacer is None:
+            return
+
+        if not self.list_splitter.isVisible() or pane.height() < 10:
+            return
+
+        geaendert = False
+
+        achse = self.bottom_axis_height()
+        info = getattr(self, "cursor_info", None)
+        if info is not None:
+            hoehe = max(achse, info.sizeHint().height())
+            if info.height() != hoehe:
+                info.setFixedHeight(hoehe)
+                geaendert = True
+
+        oben = self.list_splitter.mapTo(pane, QtCore.QPoint(0, 0)).y()
+        unten = pane.height() - oben - self.list_splitter.height()
+
+        # Die Achse rechts deckt die Zeitanzeige links ab; nur was
+        # darueber hinausgeht, muss die rechte Spalte frei lassen.
+        unten = max(unten - achse, 0)
+
+        if oben >= 0 and oben_spacer.height() != oben:
+            oben_spacer.setFixedHeight(oben)
+            geaendert = True
+
+        if unten >= 0 and unten_spacer.height() != unten:
+            unten_spacer.setFixedHeight(unten)
+            geaendert = True
+
+        if geaendert:
+            self._schedule_column_sync()
+
+    def _schedule_column_sync(self):
+        """Nach einer Randaenderung die Strip-Hoehen neu angleichen.
+
+        Ein geaenderter Rand aendert die Hoehe des Splitters, und der
+        verteilt seine neue Hoehe von selbst auf alle Felder. Erst wenn
+        das durch ist, kann man die beiden Spalten wieder aufeinander
+        legen - messen wir vorher, bekommen wir die alten Werte und der
+        Versatz bleibt stehen. Darum verzoegert.
+        """
+        timer = getattr(self, "_column_timer", None)
+
+        if timer is None:
+            timer = self._column_timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._column_sync_tick)
+
+        timer.start(0)
+
+    def _column_sync_tick(self):
+        """Raender nachmessen, dann die Hoehen angleichen.
+
+        Eine frisch eingeblendete Zeitachse ist beim ersten Messen noch
+        null hoch - erst die Anordnung gibt ihr ihre Hoehe. Deshalb wird
+        hier noch einmal gemessen; aendert sich dabei etwas, plant
+        align_columns von selbst den naechsten Durchgang. Die Schranke
+        verhindert, dass sich zwei Werte gegenseitig aufschaukeln.
+        """
+        durchgang = getattr(self, "_column_passes", 0)
+
+        if durchgang < 6:
+            self._column_passes = durchgang + 1
+            self.align_columns()
+
+        self._sync_strip_heights(self.strip_splitter, align=False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._column_passes = 0
+        self.align_columns()
+        # Beide Splitter verteilen eine neue Fensterhoehe jeder fuer
+        # sich. Weil sie um die Zeitachse verschieden hoch sind, fallen
+        # die Abschnitte dabei verschieden aus - danach also angleichen.
+        self._schedule_column_sync()
+
+    def log_strip_geometry(self, reason=""):
+        """Oberkanten beider Spalten ausmessen und ausgeben.
+
+        Links die Kanalliste mit ihrem Spaltenkopf, rechts die
+        Knopfreihe mit der Zeichenflaeche darunter. Alles in
+        Bildschirmkoordinaten, damit die Werte direkt vergleichbar sind.
+        """
+        if not STRIP_DEBUG:
+            return
+
+        def oben(widget):
+            return widget.mapToGlobal(QtCore.QPoint(0, 0)).y() if widget is not None else -1
+
+        print(f"[strip] ===== {reason} =====", flush=True)
+        print(
+            f"[strip] fenster={oben(self)} "
+            f"listen_splitter={oben(self.list_splitter)} strip_splitter={oben(self.strip_splitter)}",
+            flush=True,
+        )
+
+        for index, strip in enumerate(self.strips):
+            tree = getattr(strip, "channel_list", None)
+            header = tree.header() if tree is not None else None
+            panel = getattr(strip, "list_panel", None)
+            frame = getattr(strip, "strip_panel", None)
+
+            bar = None
+            if frame is not None and frame.layout() is not None and frame.layout().count():
+                bar = frame.layout().itemAt(0).widget()
+
+            print(
+                f"[strip] {index}: "
+                f"listenrahmen={oben(panel)} baum={oben(tree)} "
+                f"kopf={oben(header)}+{header.height() if header else 0} "
+                f"rahmen={tree.frameWidth() if tree is not None else 0} "
+                f"| plotrahmen={oben(frame)} "
+                f"knopfreihe={oben(bar)}+{bar.height() if bar else 0} "
+                f"plot={oben(strip)} "
+                f"| versatz={oben(bar) - oben(header) if (bar is not None and header is not None) else 0}",
+                flush=True,
+            )
+
     def _equalize_strips(self):
         """Allen Strips die gleiche Hoehe geben.
 
@@ -2417,20 +2784,20 @@ class Plot(QtWidgets.QWidget):
         if total > 0:
             self.strip_splitter.setSizes([max(total // count, 1)] * count)
 
-        total = sum(self.list_splitter.sizes()) or self.list_splitter.height()
-        if total > 0:
-            self.list_splitter.setSizes([max(total // count, 1)] * count)
+        # Die Liste folgt den tatsaechlichen Hoehen der Zeichenflaechen,
+        # statt sich dieselbe Rechnung noch einmal selbst zu machen.
+        self._sync_strip_heights(self.strip_splitter)
 
     def _strip_for_object(self, obj):
         """Zu welchem Strip gehoert dieses Qt-Objekt?"""
         for strip in self.strips:
             tree = getattr(strip, "channel_list", None)
-            panel = getattr(strip, "list_panel", None)
+            panels = (getattr(strip, "list_panel", None), getattr(strip, "strip_panel", None))
 
             if (
                 obj is strip.viewport()
                 or (tree is not None and obj is tree.viewport())
-                or (panel is not None and obj is panel)
+                or any(panel is not None and obj is panel for panel in panels)
             ):
                 return strip
 
@@ -2790,10 +3157,8 @@ class Plot(QtWidgets.QWidget):
                 vb.setXRange(*master.viewRange()[0], padding=0)
                 vb.setXLink(master)
 
-            # Jeder Strip bekommt seine eigene Zeitachse - sonst muss man
-            # beim Ablesen immer zum untersten Strip schauen.
-            plot.plotItem.showAxis("bottom")
-
+        self._update_strip_axes()
+        self.update_timebase_overview()
         self._number_strips()
         self._mark_active_strip()
 
@@ -2803,6 +3168,12 @@ class Plot(QtWidgets.QWidget):
         tree.owner_plot = plot
         tree.viewport().installEventFilter(self)
         plot.list_panel = self._build_list_panel(plot, tree)
+        plot.strip_panel = self._build_strip_panel(plot)
+
+        # Spaltenkopf so hoch wie die Knopfreihe nebenan: nur dann
+        # beginnen Liste und Zeichenflaeche auf derselben Hoehe, und die
+        # Zeilen im Digital- und Enumfenster stehen neben ihrem Namen.
+        tree.header().setFixedHeight(STRIP_BAR_HEIGHT)
 
         # Hoehe der Zeichenflaeche und Rollstand der Liste bestimmen, wo
         # die Signalzeilen liegen - beides kann sich jederzeit aendern.
@@ -2810,7 +3181,32 @@ class Plot(QtWidgets.QWidget):
         tree.verticalScrollBar().valueChanged.connect(partial(self.schedule_strip_layout, plot))
 
     def _build_list_panel(self, plot, tree):
-        """Kanalliste mit eigener Knopfreihe darueber.
+        """Kanalliste eines Strips, ohne alles weitere.
+
+        Die Knoepfe sitzen ueber der Zeichenflaeche (siehe
+        _build_strip_panel), nicht hier - so beginnen Liste und Zeilen
+        auf derselben Hoehe und der Platz ueber dem Plot wird genutzt.
+        """
+        panel = QtWidgets.QWidget()
+        panel.installEventFilter(self)
+        vbox = QtWidgets.QVBoxLayout(panel)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(1)
+        vbox.addWidget(tree)
+
+        tree.setMinimumHeight(20)
+
+        # Bewusst niedriger als die Zeichenflaeche nebenan: die unterste
+        # Liste muss um die Hoehe der Zeitachse kuerzer sein koennen als
+        # ihr Strip. Darf sie das nicht, holt sich der Splitter die
+        # fehlenden Punkte bei den anderen Listen - und dann laufen die
+        # Zeilen beider Spalten wieder auseinander.
+        panel.setMinimumHeight(20)
+
+        return panel
+
+    def _build_strip_panel(self, plot):
+        """Zeichenflaeche eines Strips mit der Knopfreihe darueber.
 
         Die Knoepfe wirken immer auf GENAU diesen Strip - damit ist
         eindeutig, welchen Strip "nach oben" verschiebt.
@@ -2821,7 +3217,10 @@ class Plot(QtWidgets.QWidget):
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(1)
 
-        row = QtWidgets.QHBoxLayout()
+        bar = QtWidgets.QWidget()
+        bar.setFixedHeight(STRIP_BAR_HEIGHT)
+
+        row = QtWidgets.QHBoxLayout(bar)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(1)
 
@@ -2870,8 +3269,14 @@ class Plot(QtWidgets.QWidget):
         row.addStretch()
         row.addWidget(label)
 
-        vbox.addLayout(row)
-        vbox.addWidget(tree)
+        vbox.addWidget(bar)
+        vbox.addWidget(plot)
+
+        # Beide Spalten muessen sich gleich weit zusammendruecken lassen,
+        # sonst setzt ein Splitter dieselbe Vorgabe anders um als der
+        # andere und die Zeilen laufen nach unten hin auseinander.
+        plot.setMinimumHeight(20)
+        panel.setMinimumHeight(STRIP_BAR_HEIGHT + 20)
 
         return panel
 
@@ -3200,7 +3605,18 @@ class Plot(QtWidgets.QWidget):
             minimum, maximum = float(signal.min), float(signal.max)
 
             if minimum == maximum:
-                minimum, maximum = minimum - 0.5, maximum + 0.5
+                # Ein Signal, das die ganze Messung ueber auf einem Wert
+                # steht, soll aussehen wie ein Signal, das dauerhaft auf
+                # diesem Pegel liegt: Linie oben an der Zeile, Flaeche
+                # darunter ganz gefuellt. Frueher lag der Wert in der
+                # Mitte der Zeile, dadurch war die Flaeche nur halb so
+                # hoch und sass sichtbar tiefer als ihr Listeneintrag.
+                # Dauerhaft null bleibt eine leere Zeile.
+                wert = minimum
+                if wert:
+                    minimum, maximum = wert - abs(wert), wert
+                else:
+                    minimum, maximum = 0.0, 1.0
 
             span = maximum - minimum
             dim = span * spread
@@ -3467,26 +3883,48 @@ class Plot(QtWidgets.QWidget):
         tree.itemExpanded.connect(self.update_current_values)
         tree.verticalScrollBar().valueChanged.connect(self.update_current_values)
 
-    def _sync_strip_heights(self, source):
+    def _sync_strip_heights(self, source, align=True):
         """Hoehen der beiden Spalten gleich halten.
 
         Links stehen die Kanallisten, rechts die Zeichenflaechen. Zieht
         man eine Trennlinie, muss die andere Spalte folgen, sonst sitzt
         eine Liste nicht mehr auf Hoehe ihres Strips.
+
+        align=False kommt aus _schedule_column_sync: die Raender stehen
+        dort schon, ein weiterer Durchgang wuerde sich nur selbst wieder
+        aufrufen.
         """
         if self._syncing_strip_heights:
             return
 
+        if align:
+            self.align_columns()
+
         target = self.strip_splitter if source is self.list_splitter else self.list_splitter
-        sizes = source.sizes()
-        if len(sizes) != target.count():
+
+        # Die tatsaechlichen Hoehen uebernehmen, nicht die angeforderten:
+        # ein Splitter kann eine Vorgabe wegen Mindesthoehen abweichend
+        # umsetzen, und dann laufen die beiden Spalten auseinander.
+        sizes = [source.widget(i).height() for i in range(source.count())]
+
+        if len(sizes) != target.count() or not all(sizes):
             return
+
+        # Die rechte Spalte ist um die Zeitachse unten hoeher als die
+        # linke. Der Unterschied gehoert in den letzten Abschnitt: dann
+        # endet jede Liste genau dort, wo die Zeichenflaeche ihres
+        # Strips endet - beim untersten also oberhalb der Zeitachse.
+        delta = target.height() - source.height()
+        if delta:
+            sizes[-1] = max(sizes[-1] + delta, 1)
 
         self._syncing_strip_heights = True
         try:
             target.setSizes(sizes)
         finally:
             self._syncing_strip_heights = False
+
+        self.log_strip_geometry("nach dem Angleichen der Hoehen")
 
     def channel_lists(self):
         """Alle Kanallisten des Fensters, in Strip-Reihenfolge."""
@@ -3623,7 +4061,15 @@ class Plot(QtWidgets.QWidget):
 
     @bookmarks.setter
     def bookmarks(self, bkms):
-        self.plot.bookmarks = bkms or []
+        bkms = bkms or []
+
+        # Lesezeichen gehoeren zur Messdatei, also in jeden Strip. Jeder
+        # braucht aber eigene Zeichenobjekte - dasselbe Objekt kann nicht
+        # in zwei Zeichenflaechen haengen.
+        for strip in getattr(self, "strips", None) or [self.plot]:
+            strip.bookmarks = [
+                bookmark.copy() if isinstance(bookmark, Bookmark) else bookmark for bookmark in bkms
+            ]
 
         self.bookmarks_changed.emit([bookmark.copy() for bookmark in self.plot.bookmarks], self)
 
@@ -4259,10 +4705,21 @@ class Plot(QtWidgets.QWidget):
             if offset:
                 self.schedule_strip_choice(strip, offset)
 
+        # Zug aus der Kanalliste eines ANDEREN Plotfensters: das soll
+        # verschieben, nicht kopieren. Hier entstehen die Kanaele neu,
+        # drueben muessen sie also weg - aber erst, wenn es geklappt hat.
+        moving = moving_source(e, self)
+
         data = e.mimeData()
         if data.hasFormat("application/octet-stream-asammdf"):
             names = extract_mime_names(data)
+
+            before = signal_count(self)
             self.add_channels_request.emit(names)
+
+            if moving is not None and signal_count(self) > before:
+                tree, items = moving
+                tree.delete_items(items)
         else:
             e.ignore()
 
@@ -4276,16 +4733,24 @@ class Plot(QtWidgets.QWidget):
             hide = not self.hide_axes_btn.isFlat()
             self._settings.setValue("plot/hide_axes", hide)
 
+        # Der Knopf gilt fuer das ganze Fenster, nicht nur fuer den
+        # aktiven Strip - sonst behalten die uebrigen ihre Achsen.
+        for strip in self.strips:
+            if hide:
+                strip.y_axis.hide()
+            elif not getattr(strip, "digital_mode", False):
+                # Im Digitalmodus gehoert die Werteachse ohnehin weg.
+                strip.y_axis.show()
+
         if hide:
-            self.plot.y_axis.hide()
-            self.plot.x_axis.hide()
             self.hide_axes_btn.setFlat(True)
             self.hide_axes_btn.setToolTip("Show axes")
         else:
-            self.plot.y_axis.show()
-            self.plot.x_axis.show()
             self.hide_axes_btn.setFlat(False)
             self.hide_axes_btn.setToolTip("Hide axes")
+
+        # Die Zeitachse haengt am untersten Strip, also hier entlang.
+        self._update_strip_axes()
 
         if hide:
             png = ":/axis.png"
@@ -5118,10 +5583,13 @@ class Plot(QtWidgets.QWidget):
         else:
             self.bookmark_btn.setFlat(True)
 
-        for bookmark in self.bookmarks:
-            bookmark.visible = self.show_bookmarks
+        # ueber alle Strips: der Knopf sitzt zwar in einer Strip-Reihe,
+        # gemeint ist aber das ganze Fenster
+        for strip in getattr(self, "strips", None) or [self.plot]:
+            for bookmark in strip.bookmarks:
+                bookmark.visible = self.show_bookmarks
 
-        self.plot.update()
+            strip.update()
 
         if not self.show_bookmarks:
             png = ":/bookmark.png"
@@ -5500,9 +5968,6 @@ class PlotGraphics(pg.PlotWidget):
 
         self.y_axis.scale_editor_requested.connect(self.open_scale_editor)
         self.y_axis.rangeChanged.connect(self.set_y_range)
-
-        # Wie viel vom Kanalnamen auf die Achse passt, haengt an ihrer Hoehe
-        self.y_axis.geometryChanged.connect(self.refresh_axis_label)
 
         self.plot_item.setAxisItems({"left": self.y_axis, "bottom": self.x_axis})
 
@@ -6002,6 +6467,23 @@ class PlotGraphics(pg.PlotWidget):
         else:
             self.current_uuid = None
 
+            # Leerer Strip: sonst bleibt die Achse mit Beschriftung und
+            # Farbe des zuletzt gezeigten Signals stehen.
+            match self._settings.value("plot/background"):
+                case "Black":
+                    foreground = "#FFFFFF"
+                case "White":
+                    foreground = "#000000"
+                case _:
+                    foreground = self._settings.value("plot/foreground", "#ffffff")
+
+            self.y_axis.setLabel("")
+            self.y_axis.text_conversion = None
+            self.y_axis.set_pen(fn.mkPen(foreground))
+            self.y_axis.setTextPen(foreground)
+            self.y_axis.picture = None
+            self.y_axis.update()
+
         if needs_timebase_compute:
             self._compute_all_timebase()
 
@@ -6013,6 +6495,27 @@ class PlotGraphics(pg.PlotWidget):
             e.accept()
 
         super().dragEnterEvent(e)
+
+    def grid_time_strip(self):
+        """Welcher Strip liefert die Teilstriche fuer das Zeitgitter?
+
+        Die Zeitachse zeigt nur noch der unterste Strip, und eine
+        versteckte Achse rechnet keine Teilstriche aus. Also nimmt jeder
+        Strip die Striche der einen sichtbaren Zeitachse - alle Strips
+        zeigen ohnehin denselben Zeitbereich. Sind alle Achsen aus,
+        kommt None zurueck und es gibt kein Zeitgitter.
+        """
+        if self.x_axis.isVisible():
+            return self
+
+        parent = getattr(self, "plot_parent", None)
+
+        for strip in reversed(getattr(parent, "strips", None) or ()):
+            axis = getattr(strip, "x_axis", None)
+            if axis is not None and axis.isVisible() and strip.px:
+                return strip
+
+        return None
 
     def draw_grids(self, paint, viewbox_rect, ratio):
         if self._grid_pixmap is None:
@@ -6039,11 +6542,22 @@ class PlotGraphics(pg.PlotWidget):
                             QtCore.QPointF((viewbox_rect.x() + viewbox_rect.width()) * ratio, y_pos),
                         )
 
-                if self.x_axis.grid and self.x_axis.isVisible():
-                    for pen, p1, p2 in self.x_axis.tickSpecs:
+                quelle = self.grid_time_strip() if self.x_axis.grid else None
+
+                if quelle is not None:
+                    # Die Teilstriche kommen von der einen sichtbaren
+                    # Zeitachse ganz unten. Breit sind die Strips
+                    # verschieden (die Werteachsen links brauchen
+                    # unterschiedlich viel Platz), darum wird die Lage
+                    # jedes Strichs ueber seinen Zeitwert umgerechnet
+                    # und nicht einfach uebernommen.
+                    faktor = quelle.px / self.px if quelle is not self and self.px else 1.0
+                    versatz = (quelle.x_range[0] - self.x_range[0]) / self.px if self.px else 0.0
+
+                    for pen, p1, p2 in quelle.x_axis.tickSpecs:
                         pen2 = fn.mkPen(pen)
                         pen2.setStyle(QtCore.Qt.PenStyle.DashLine)
-                        x_pos = p1.x()
+                        x_pos = p1.x() * faktor + versatz
                         paint.setPen(pen2)
                         paint.drawLine(
                             QtCore.QPointF(x_pos, 0),
@@ -7311,23 +7825,25 @@ class PlotGraphics(pg.PlotWidget):
         paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
         paint.setRenderHint(paint.RenderHint.Antialiasing, False)
 
-        if self.y_axis.picture is None:
-            self.y_axis.paint(paint, None, None)
+        # Versteckte Achsen haben keine Flaeche mehr. Sie trotzdem zu
+        # zeichnen kostet nur Zeit und wirft Warnungen, weil das Bild
+        # dann leer ist - die Zeitachse zeigt ohnehin nur der unterste
+        # Strip.
+        for axis in (self.y_axis, self.x_axis):
+            if not axis.isVisible():
+                continue
 
-        if self.x_axis.picture is None:
-            self.x_axis.paint(paint, None, None)
+            if axis.picture is None:
+                axis.paint(paint, None, None)
 
-        paint.drawPixmap(
-            self.y_axis.sceneBoundingRect(),
-            self.y_axis.picture,
-            self.y_axis.picture.rect(),
-        )
+            if axis.picture is None or axis.picture.isNull():
+                continue
 
-        paint.drawPixmap(
-            self.x_axis.sceneBoundingRect(),
-            self.x_axis.picture,
-            self.x_axis.picture.rect(),
-        )
+            paint.drawPixmap(
+                axis.sceneBoundingRect(),
+                axis.picture,
+                axis.picture.rect(),
+            )
 
         for ax in self.axes:
             if isinstance(ax, FormatedAxis) and ax.isVisible():
@@ -7587,10 +8103,16 @@ class PlotGraphics(pg.PlotWidget):
         if not self.py or sig.y_range is None or len(x) < 2:
             return None
 
+        # Gefuellt wird bis zur Unterkante der eigenen Zeile, nicht bis
+        # zum kleinsten Wert des Signals. Ein Signal, das die ganze
+        # Messung ueber auf 1 steht, haette sonst Linie und Grundlinie
+        # an derselben Stelle - und damit gar keine Flaeche.
+        band = getattr(sig, "enum_band", None)
+
         try:
             y_low, y_high = (float(e) for e in sig.y_range)
-            minimum = float(sig.min)
-        except (TypeError, ValueError):
+            minimum = float(band[0]) if band else float(sig.min)
+        except (TypeError, ValueError, IndexError):
             return None
 
         y_scale = (y_high - y_low) / float(self.py)
@@ -7742,52 +8264,12 @@ class PlotGraphics(pg.PlotWidget):
         self.update()
 
     def axis_label(self, sig, axis=None):
-        """Beschriftung der Y-Achse: Name und Einheit, auf die Achse gekuerzt.
+        """Beschriftung der Y-Achse: Name und Einheit, ungekuerzt.
 
-        Die Beschriftung laeuft laengs der Achse. Bei einem kurzen Strip
-        ist ein langer Kanalname laenger als die Achse hoch ist, und was
-        nicht hineinpasst, schneidet Qt wortlos ab. Also vorher selbst
-        kuerzen, und zwar in dieser Reihenfolge: erst den ganzen Namen
-        mit Einheit, dann den ganzen Namen ohne Einheit, erst zuletzt
-        den Namen mit Auslassungszeichen.
+        Das Kuerzen auf die Laenge der Achse macht die Achse selbst -
+        nur sie kennt ihre jeweils aktuelle Hoehe.
         """
-        unit = f" [{sig.unit}]" if sig.unit else ""
-
-        height = int(axis.height()) if axis is not None else 0
-
-        if height < 40:
-            # Achse noch ohne Groesse: feste Obergrenze wie bisher
-            name = sig.name if len(sig.name) <= 32 else f"{sig.name[:29]}..."
-
-            return f"{name}{unit}"
-
-        metrics = QtGui.QFontMetrics(axis.label.font())
-        room = height - 16
-
-        if metrics.horizontalAdvance(f"{sig.name}{unit}") <= room:
-            return f"{sig.name}{unit}"
-
-        if metrics.horizontalAdvance(sig.name) <= room:
-            return sig.name
-
-        return metrics.elidedText(sig.name, QtCore.Qt.TextElideMode.ElideRight, max(room, 32))
-
-    def refresh_axis_label(self, *args):
-        """Beschriftung der Y-Achse an eine neue Fensterhoehe anpassen."""
-        # kann schon beim Aufbau des Fensters feuern
-        uuid = getattr(self, "current_uuid", None)
-        if uuid is None:
-            return
-
-        try:
-            signal, _index = self.signal_by_uuid(uuid)
-        except KeyError:
-            return
-
-        label = self.axis_label(signal, self.y_axis)
-
-        if label != getattr(self.y_axis, "labelText", None):
-            self.y_axis.setLabel(label)
+        return f"{sig.name} [{sig.unit}]" if sig.unit else sig.name
 
     def set_current_uuid(self, uuid, force=False):
         axis = self.y_axis
@@ -7929,16 +8411,7 @@ class PlotGraphics(pg.PlotWidget):
             sig_axis.append(self.y_axis)
 
         for axis in sig_axis:
-            if len(sig.name) <= 32:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name} [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name}")
-            else:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name[:29]}...  [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name[:29]}...")
+            axis.setLabel(self.axis_label(sig, axis))
             axis.update()
         self.update()
 
@@ -8030,16 +8503,7 @@ class PlotGraphics(pg.PlotWidget):
             sig_axis.append(self.y_axis)
 
         for axis in sig_axis:
-            if len(sig.name) <= 32:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name} [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name}")
-            else:
-                if sig.unit:
-                    axis.setLabel(f"{sig.name[:29]}...  [{sig.unit}]")
-                else:
-                    axis.setLabel(f"{sig.name[:29]}...")
+            axis.setLabel(self.axis_label(sig, axis))
             axis.update()
 
         self.update()
