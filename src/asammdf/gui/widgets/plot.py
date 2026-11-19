@@ -2437,6 +2437,13 @@ class Plot(QtWidgets.QWidget):
 
         self.update_timebase_overview()
 
+        # Neue Kanaele in einem XY-Strip: Achse und Markierung nachziehen.
+        for strip in self.strips:
+            if getattr(strip, "xy_mode", False):
+                strip._xy_cache = {}
+                self.apply_xy_range(strip)
+                self.update_strip_marks(strip)
+
         self.adjust_splitter(initial=initial)
         self.current_uuid_changed(self.plot.current_uuid)
         self.plot._can_paint = True
@@ -2631,13 +2638,24 @@ class Plot(QtWidgets.QWidget):
             return
 
         versteckt = btn.isFlat()
-        letzter = self.strips[-1]
+
+        # Die eine Zeitachse gehoert unter den untersten Strip, der
+        # ueberhaupt die Zeit zeigt. Ist der unterste ein XY-Strip,
+        # bekommt sie der letzte Zeitstrip darueber - sonst haette das
+        # Fenster gar keine Zeitachse mehr.
+        zeitstrips = [strip for strip in self.strips if not getattr(strip, "xy_mode", False)]
+        letzter = zeitstrips[-1] if zeitstrips else None
 
         for strip in self.strips:
-            if versteckt or strip is not letzter:
+            # Ein XY-Strip zeigt auf der x-Achse einen Signalwert - der
+            # passt nicht zur gemeinsamen Zeitachse, also bekommt er
+            # immer seine eigene.
+            if versteckt:
                 strip.plotItem.hideAxis("bottom")
-            else:
+            elif getattr(strip, "xy_mode", False) or strip is letzter:
                 strip.plotItem.showAxis("bottom")
+            else:
+                strip.plotItem.hideAxis("bottom")
 
         # Jede Aktion bekommt ihr eigenes Nachmess-Budget.
         self._column_passes = 0
@@ -2649,6 +2667,9 @@ class Plot(QtWidgets.QWidget):
         if not getattr(self, "strips", None):
             return 0
 
+        # Fuer die Zeitanzeige links unten zaehlt nur eine Achse am
+        # UNTERSTEN Strip: die eines XY-Strips weiter oben sitzt mitten
+        # im Fenster und laesst unten keinen Platz frei.
         axis = getattr(self.strips[-1], "x_axis", None)
         if axis is None or not axis.isVisible():
             return 0
@@ -3070,9 +3091,26 @@ class Plot(QtWidgets.QWidget):
             # aeltere Konfigurationen kennen nur digital ja/nein
             modes = ["digital" if state else "analog" for state in digital]
 
+        x_channels = getattr(self, "_pending_strip_x_channels", None) or []
+        self._pending_strip_x_channels = []
+
         for index, mode in enumerate(modes):
-            if index < len(self.strips) and mode != "analog":
-                self.set_window_mode(self.strips[index], mode)
+            if index >= len(self.strips):
+                break
+
+            strip = self.strips[index]
+
+            # Erst das X-Signal setzen, dann umschalten: sonst nimmt der
+            # Strip beim Umschalten das erste Signal der Liste.
+            if mode == "xy" and index < len(x_channels):
+                name = x_channels[index]
+                for signal in strip.signals:
+                    if signal.name == name:
+                        strip.x_uuid = signal.uuid
+                        break
+
+            if mode != "analog":
+                self.set_window_mode(strip, mode)
 
         self.set_active_strip(self.strips[0])
         self._equalize_strips()
@@ -3171,15 +3209,23 @@ class Plot(QtWidgets.QWidget):
         strip.set_name(uuid, name)
 
     def _relink_strips(self):
-        """x-Achsen koppeln, Cursor koppeln, Zeitachse nur unten zeigen."""
-        master = self.strips[0].plotItem.vb
+        """x-Achsen koppeln, Cursor koppeln, Zeitachse nur unten zeigen.
 
-        for i, plot in enumerate(self.strips):
+        XY-Strips bleiben aussen vor: ihre x-Achse zeigt einen Signalwert
+        und darf nicht am gemeinsamen Zeitbereich haengen.
+        """
+        zeitstrips = [plot for plot in self.strips if not getattr(plot, "xy_mode", False)]
+        master = zeitstrips[0].plotItem.vb if zeitstrips else None
+
+        for plot in self.strips:
             vb = plot.plotItem.vb
             vb.setXLink(None)
-            if i:
-                vb.setXRange(*master.viewRange()[0], padding=0)
-                vb.setXLink(master)
+
+            if master is None or vb is master or getattr(plot, "xy_mode", False):
+                continue
+
+            vb.setXRange(*master.viewRange()[0], padding=0)
+            vb.setXLink(master)
 
         self._update_strip_axes()
         self.update_timebase_overview()
@@ -3361,7 +3407,7 @@ class Plot(QtWidgets.QWidget):
         menu.addSeparator()
         window_type = menu.addMenu("Window type")
         menu._strip_mode_actions = {}
-        for mode, text in (("analog", "Analog"), ("digital", "Digital"), ("enum", "Enum")):
+        for mode, text in (("analog", "Analog"), ("digital", "Digital"), ("enum", "Enum"), ("xy", "XY")):
             action = window_type.addAction(text, partial(self.set_window_mode, plot, mode))
             action.setCheckable(True)
             menu._strip_mode_actions[mode] = action
@@ -3452,17 +3498,39 @@ class Plot(QtWidgets.QWidget):
 
         return True
 
+    def _x_channel_name(self, plot):
+        """Name des X-Signals eines Strips - leer, wenn keins gesetzt ist."""
+        signal = plot.xy_x_signal() if hasattr(plot, "xy_x_signal") else None
+
+        return signal.name if signal is not None else ""
+
     def window_mode(self, plot):
-        """Fenstertyp eines Strips: analog, digital oder enum."""
+        """Fenstertyp eines Strips: analog, digital, enum oder xy."""
+        if getattr(plot, "xy_mode", False):
+            return "xy"
+
         if not getattr(plot, "digital_mode", False):
             return "analog"
 
         return "enum" if getattr(plot, "enum_mode", False) else "digital"
 
     def set_window_mode(self, plot, mode):
-        """Zwischen analoger, digitaler und Enum-Darstellung wechseln."""
-        if mode not in ("analog", "digital", "enum"):
+        """Zwischen analoger, digitaler, Enum- und XY-Darstellung wechseln."""
+        if mode not in ("analog", "digital", "enum", "xy"):
             return
+
+        if mode == "xy":
+            # Gestapelte Baender und XY vertragen sich nicht: dort steht
+            # die Zeit auf der x-Achse, hier ein Signalwert.
+            if getattr(plot, "digital_mode", False):
+                self.set_digital_mode(plot, False)
+
+            plot.enum_mode = False
+            self.set_xy_mode(plot, True)
+            return
+
+        if getattr(plot, "xy_mode", False):
+            self.set_xy_mode(plot, False)
 
         plot.enum_mode = mode == "enum"
 
@@ -3475,6 +3543,128 @@ class Plot(QtWidgets.QWidget):
             self.layout_digital_strip(plot)
             self._number_strips()
             plot.update()
+
+    def set_xy_mode(self, plot, state):
+        """Strip auf XY umschalten.
+
+        Auf der x-Achse steht dann der Wert eines Signals aus diesem
+        Strip statt der Zeit. Der Strip haengt dafuer nicht mehr am
+        gemeinsamen Zeitbereich der anderen Strips.
+        """
+        state = bool(state)
+
+        if state == bool(getattr(plot, "xy_mode", False)):
+            if state:
+                self.apply_xy_range(plot)
+            return
+
+        plot.xy_mode = state
+        plot._xy_cache = {}
+
+        if state:
+            # Zeitzustand merken, um ihn beim Zurueckschalten wieder
+            # herzustellen.
+            plot._xy_time_range = tuple(plot.viewbox.viewRange()[0])
+            plot._xy_old_format = plot.x_axis.format
+            plot._xy_old_label = plot.x_axis.labelText
+
+            if plot.x_uuid is None or not any(sig.uuid == plot.x_uuid for sig in plot.signals):
+                # Ohne Angabe nimmt der Strip das erste Signal der Liste;
+                # ueber das Rechtsklickmenue ist es schnell geaendert.
+                plot.x_uuid = plot.signals[0].uuid if plot.signals else None
+
+            # ERST abkoppeln, dann den Wertebereich setzen. Andersherum
+            # zieht der Verbund alle anderen Strips auf diesen Bereich
+            # mit - aus 0..30 s wuerden 440..3560 1/min.
+            self._relink_strips()
+            self.apply_xy_range(plot)
+            self._leave_x_signal(plot)
+        else:
+            plot.x_axis.format = getattr(plot, "_xy_old_format", "time")
+            plot.x_axis.setLabel(getattr(plot, "_xy_old_label", "") or "")
+
+            bereich = getattr(plot, "_xy_time_range", None)
+            if bereich:
+                plot.viewbox.setXRange(*bereich, padding=0)
+
+            # Erst jetzt wieder an den gemeinsamen Zeitbereich haengen.
+            self._relink_strips()
+            plot.trim(force=True)
+
+        self._update_strip_axes()
+        self.update_strip_marks(plot)
+        plot.update()
+
+    def apply_xy_range(self, plot):
+        """x-Achse eines XY-Strips auf das X-Signal einstellen."""
+        if not getattr(plot, "xy_mode", False):
+            return
+
+        x_sig = plot.xy_x_signal()
+
+        if x_sig is not None:
+            plot.x_axis.format = x_sig.format
+            plot.x_axis.text_conversion = x_sig.conversion if hasattr(x_sig.conversion, "text_0") else None
+            plot.x_axis.setLabel(plot.axis_label(x_sig))
+        else:
+            plot.x_axis.format = "phys"
+            plot.x_axis.text_conversion = None
+            plot.x_axis.setLabel("")
+
+        bereich = plot.xy_value_range()
+        if bereich is not None:
+            plot.viewbox.blockSignals(True)
+            try:
+                plot.viewbox.setXRange(*bereich, padding=0)
+            finally:
+                plot.viewbox.blockSignals(False)
+            plot.x_range = bereich
+
+    def set_x_signal(self, plot, uuid):
+        """Dieses Signal stellt ab jetzt die x-Achse des Strips.
+
+        Schaltet den Strip gleich mit in den XY-Modus - wer ein Signal
+        zur x-Achse macht, will genau das.
+        """
+        plot.x_uuid = uuid
+        plot._xy_cache = {}
+
+        if not getattr(plot, "xy_mode", False):
+            self.set_window_mode(plot, "xy")
+        else:
+            self.apply_xy_range(plot)
+            self._leave_x_signal(plot)
+            self.update_strip_marks(plot)
+            plot.update()
+
+    def _leave_x_signal(self, plot):
+        """Die linke Achse soll ein Signal zeigen, das auch gezeichnet wird.
+
+        Bleibt das X-Signal das aktuelle, gehoert die Werteachse einer
+        Kurve, die es gar nicht gibt - Zoomen und Schieben wirken dann
+        ins Leere.
+        """
+        if not getattr(plot, "xy_mode", False) or plot.current_uuid != plot.x_uuid:
+            return
+
+        for signal in plot.signals:
+            if signal.uuid != plot.x_uuid and signal.enable:
+                plot.set_current_uuid(signal.uuid, True)
+                return
+
+    def update_strip_marks(self, plot):
+        """Das rote X in der Kanalliste nachziehen."""
+        tree = getattr(plot, "channel_list", None)
+        if tree is None:
+            return
+
+        x_uuid = plot.x_uuid if getattr(plot, "xy_mode", False) else None
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+            if item.type() == ChannelsTreeItem.Channel:
+                item.set_x_axis_mark(item.uuid == x_uuid)
 
     def toggle_digital_mode(self, plot):
         self.set_digital_mode(plot, not getattr(plot, "digital_mode", False))
@@ -5552,6 +5742,7 @@ class Plot(QtWidgets.QWidget):
             "strip_sizes": [int(e) for e in self.strip_splitter.sizes()],
             "strip_digital": [bool(getattr(strip, "digital_mode", False)) for strip in self.strips],
             "strip_modes": [self.window_mode(strip) for strip in self.strips],
+            "strip_x_channels": [self._x_channel_name(strip) for strip in self.strips],
             "pattern": self.pattern,
             "splitter": [int(e) for e in self.splitter.sizes()[:2]]
             + [
@@ -5888,6 +6079,12 @@ class PlotGraphics(pg.PlotWidget):
         self.current_uuid = None
         self.digital_mode = False
         self.enum_mode = False
+
+        # XY-Modus: auf der x-Achse steht nicht die Zeit, sondern der
+        # Wert eines Signals aus diesem Strip.
+        self.xy_mode = False
+        self.x_uuid = None
+        self._xy_cache = {}
 
         self.standalone = kwargs.get("standalone", False)
 
@@ -6331,7 +6528,7 @@ class PlotGraphics(pg.PlotWidget):
 
                 else:
                     if self.cursor1 is not None:
-                        self.cursor1.setPos(pos)
+                        self.cursor1.setPos(self.cursor_position(pos))
                         self.cursor1.sigPositionChangeFinished.emit(self.cursor1)
 
             now = perf_counter()
@@ -6402,8 +6599,74 @@ class PlotGraphics(pg.PlotWidget):
             self.region.moving_cursor.setPos(pos)
 
         elif self.cursor1 is not None:
-            self.cursor1.setPos(pos)
+            self.cursor1.setPos(self.cursor_position(pos))
             self.cursor1.sigPositionChangeFinished.emit(self.cursor1)
+
+    def cursor_position(self, pos):
+        """Wohin der Cursor beim Klicken gehoert.
+
+        Im Zeitbetrieb genau dorthin, wo geklickt wurde. Im XY-Strip ist
+        die Stelle ein Wertepaar und keine Zeit - dort wird der
+        naechstgelegene Punkt der gezeichneten Kurven genommen, so wie es
+        das XY-Fenster auch macht.
+        """
+        if not self.xy_mode:
+            return pos
+
+        stempel = self.xy_timestamp_at(pos)
+
+        return pos if stempel is None else stempel
+
+    def xy_timestamp_at(self, pos):
+        """Zeitpunkt des Kurvenpunktes, der dieser Stelle am naechsten liegt.
+
+        Verglichen wird im Bild, nicht in den Werten: beide Achsen werden
+        auf 0..1 gebracht, sonst gewaenne immer die Achse mit den
+        groesseren Zahlen.
+        """
+        x0, x1 = self.x_range
+        y0, y1 = self.viewbox.viewRange()[1]
+
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        ziel_x = (pos.x() - x0) / (x1 - x0)
+        ziel_y = (pos.y() - y0) / (y1 - y0)
+
+        bester = None
+        kleinster = None
+
+        for sig in self.signals:
+            if not sig.enable:
+                continue
+
+            paar = self.xy_pairs(sig)
+            if paar is None:
+                continue
+
+            x_werte, y_werte = paar
+            if not len(x_werte):
+                continue
+
+            try:
+                sig_low, sig_high = (float(e) for e in sig.y_range)
+            except (TypeError, ValueError):
+                continue
+
+            if sig_high <= sig_low:
+                continue
+
+            dx = (x_werte - x0) / (x1 - x0) - ziel_x
+            dy = (y_werte - sig_low) / (sig_high - sig_low) - ziel_y
+
+            abstand = dx * dx + dy * dy
+            index = int(np.nanargmin(abstand))
+
+            if kleinster is None or abstand[index] < kleinster:
+                kleinster = abstand[index]
+                bester = float(sig.timestamps[index])
+
+        return bester
 
     def _cursor_zoom(self, zoom):
         self.zoom = zoom
@@ -7684,8 +7947,17 @@ class PlotGraphics(pg.PlotWidget):
                 ):
                     continue
 
-                y = sig.plot_samples
-                x = sig.plot_timestamps
+                if self.xy_mode:
+                    # Ueber der Zeit wird hier nichts gezeichnet: x kommt
+                    # vom X-Signal. Gezeichnet wird die ganze Messung,
+                    # nicht der sichtbare Zeitausschnitt.
+                    paar = self.xy_pairs(sig)
+                    if paar is None:
+                        continue
+                    x, y = paar
+                else:
+                    y = sig.plot_samples
+                    x = sig.plot_timestamps
 
                 if len(x):
                     if self.enum_mode and self.draw_enum_bands(paint, sig, x_start):
@@ -7890,7 +8162,11 @@ class PlotGraphics(pg.PlotWidget):
 
         if self.zoom is None:
 
-            if self.region is not None:
+            if self.xy_mode:
+                # Eine senkrechte Linie waere hier sinnlos - auf der
+                # x-Achse steht ein Signalwert, keine Zeit.
+                self.draw_xy_cursor(paint)
+            elif self.region is not None:
                 self.region.paint(paint, plot=self, uuid=self.current_uuid)
             elif self.cursor1 is not None and self.cursor1.isVisible():
                 self.cursor1.paint(paint, plot=self, uuid=self.current_uuid)
@@ -8117,6 +8393,147 @@ class PlotGraphics(pg.PlotWidget):
             start = index
 
         return True
+
+    def xy_x_signal(self):
+        """Das Signal, das im XY-Modus die x-Achse stellt.
+
+        Ist es geloescht worden, rueckt das erste Signal der Liste nach -
+        sonst bliebe der Strip ohne jeden Hinweis leer.
+        """
+        if not self.xy_mode:
+            return None
+
+        if self.x_uuid is not None:
+            try:
+                signal, _index = self.signal_by_uuid(self.x_uuid)
+            except KeyError:
+                signal = None
+
+            if signal is not None:
+                return signal
+
+        self.x_uuid = self.signals[0].uuid if self.signals else None
+        self._xy_cache = {}
+
+        return self.signals[0] if self.signals else None
+
+    def xy_pairs(self, sig):
+        """Wertepaare (x, y) eines Signals im XY-Modus.
+
+        Auf der x-Achse stehen die Werte des X-Signals. Beide Signale
+        koennen verschiedene Zeitstempel haben, deshalb wird das
+        X-Signal auf die Zeitstempel des gezeichneten Signals
+        interpoliert. Das Ergebnis wird gemerkt, solange sich an den
+        Laengen nichts aendert.
+        """
+        x_sig = self.xy_x_signal()
+        if x_sig is None or sig.uuid == x_sig.uuid:
+            return None
+
+        zeit = sig.timestamps
+        if zeit is None or not len(zeit) or not len(x_sig.timestamps):
+            return None
+
+        schluessel = (x_sig.uuid, len(x_sig.timestamps), len(zeit))
+        gemerkt = self._xy_cache.get(sig.uuid)
+        if gemerkt is not None and gemerkt[0] == schluessel:
+            return gemerkt[1]
+
+        try:
+            x_werte = np.interp(zeit, x_sig.timestamps, x_sig.samples.astype("f8"))
+            y_werte = sig.samples.astype("f8")
+        except (TypeError, ValueError):
+            return None
+
+        paar = (x_werte, y_werte)
+        self._xy_cache[sig.uuid] = (schluessel, paar)
+
+        return paar
+
+    def xy_value_range(self):
+        """Wertebereich des X-Signals - das ist der Bereich der x-Achse."""
+        x_sig = self.xy_x_signal()
+        if x_sig is None:
+            return None
+
+        werte = getattr(x_sig, "samples", None)
+        if werte is None or not len(werte):
+            return None
+
+        try:
+            werte = werte.astype("f8")
+            unten, oben = float(np.nanmin(werte)), float(np.nanmax(werte))
+        except (TypeError, ValueError):
+            return None
+
+        if not (np.isfinite(unten) and np.isfinite(oben)):
+            return None
+
+        if unten == oben:
+            unten, oben = unten - 0.5, oben + 0.5
+
+        rand = (oben - unten) * 0.02
+
+        return unten - rand, oben + rand
+
+    def draw_xy_cursor(self, paint):
+        """Punkt je Kurve an der Stelle des Zeitcursors.
+
+        Der Cursor bleibt auch im XY-Modus eine Zeitangabe - er wandert
+        nur nicht mehr als Linie durch das Bild, sondern sitzt als
+        Markierung auf jeder Kurve.
+        """
+        cursor = self.cursor1
+        if cursor is None or not cursor.isVisible():
+            return
+
+        rect = self.viewbox.sceneBoundingRect()
+        breite, hoehe = rect.width(), rect.height()
+        x0, x1 = self.x_range
+
+        if breite <= 0 or hoehe <= 0 or x1 <= x0:
+            return
+
+        stempel = cursor.value()
+
+        paint.setRenderHints(paint.RenderHint.Antialiasing, True)
+
+        for sig in self.signals:
+            if not sig.enable:
+                continue
+
+            paar = self.xy_pairs(sig)
+            if paar is None:
+                continue
+
+            x_werte, y_werte = paar
+            if not len(x_werte):
+                continue
+
+            index = int(np.searchsorted(sig.timestamps, stempel, side="right")) - 1
+            index = min(max(index, 0), len(x_werte) - 1)
+
+            try:
+                y_low, y_high = (float(e) for e in sig.y_range)
+            except (TypeError, ValueError):
+                continue
+
+            if y_high <= y_low:
+                continue
+
+            px = rect.x() + (float(x_werte[index]) - x0) / (x1 - x0) * breite
+            py = rect.y() + (y_high - float(y_werte[index])) / (y_high - y_low) * hoehe
+
+            if not (np.isfinite(px) and np.isfinite(py)):
+                continue
+
+            stift = fn.mkPen(sig.color.name())
+            stift.setWidth(2)
+            paint.setPen(stift)
+            paint.setBrush(QtGui.QBrush())
+            paint.drawEllipse(QtCore.QPointF(px, py), 5, 5)
+
+        paint.setRenderHints(paint.RenderHint.Antialiasing, False)
 
     def digital_fill_path(self, path, sig, x):
         """Treppenkurve bis zur Grundlinie schliessen, damit sie fuellbar wird.
@@ -8533,6 +8950,13 @@ class PlotGraphics(pg.PlotWidget):
         self.update()
 
     def set_y_range(self, uuid, y_range, emit=True):
+        # Das X-Signal eines XY-Strips wird nicht als Kurve gezeichnet -
+        # sein Wertebereich gehoert der x-Achse. Ihn ueber die Werteachse
+        # zu verschieben wuerde nur die Beschriftung verstellen.
+        ziel = self.current_uuid if uuid is None else uuid
+        if self.xy_mode and ziel is not None and ziel == self.x_uuid:
+            return
+
         update = False
 
         if uuid is None:
@@ -8632,6 +9056,19 @@ class PlotGraphics(pg.PlotWidget):
         if not self._can_trim:
             return
 
+        # Im XY-Modus ist der sichtbare Bereich ein Wertebereich und
+        # keine Zeitspanne - danach zu beschneiden wuerde die Kurve
+        # zerstoeren. Dort wird ohnehin die ganze Messung gezeichnet.
+        #
+        # Die gemerkten Kurvenpfade muessen aber weg: generatePath gibt
+        # sonst beim naechsten Zeichnen den alten Pfad zurueck, und die
+        # Kurve bleibt beim Schieben und Zoomen stehen, waehrend sich
+        # Achse und Cursorpunkte bewegen.
+        if self.xy_mode:
+            for sig in signals:
+                sig.path = None
+            return
+
         if view_range is None:
             (start, stop), _ = self.viewbox.viewRange()
         else:
@@ -8714,6 +9151,11 @@ class PlotGraphics(pg.PlotWidget):
             y_range = args[1]
 
         update = False
+
+        # Das X-Signal hat im XY-Strip keine Kurve - sein Wertebereich
+        # zu verschieben bewegt nichts und verstellt nur die Achse.
+        if self.xy_mode and self.current_uuid and self.current_uuid == self.x_uuid:
+            return
 
         if self.current_uuid in self.common_axis_items:
             for uuid in self.common_axis_items:

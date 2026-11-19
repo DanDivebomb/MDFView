@@ -435,6 +435,33 @@ class FileTreeWidget(QtWidgets.QTreeWidget):
         self.mode = "Natural sort"
 
 
+X_AXIS_ICON = None
+
+
+def x_axis_icon():
+    """Rotes X: dieses Signal stellt im XY-Strip die x-Achse."""
+    global X_AXIS_ICON
+
+    if X_AXIS_ICON is None:
+        pixmap = QtGui.QPixmap(16, 16)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+        stift = QtGui.QPen(QtGui.QColor("#ff3030"))
+        stift.setWidth(3)
+        stift.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        painter.setPen(stift)
+        painter.drawLine(4, 4, 12, 12)
+        painter.drawLine(12, 4, 4, 12)
+        painter.end()
+
+        X_AXIS_ICON = QtGui.QIcon(pixmap)
+
+    return X_AXIS_ICON
+
+
 class Delegate(QtWidgets.QItemDelegate):
     def __init__(self, *args):
         super().__init__(*args)
@@ -1323,6 +1350,12 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         if item and item.type() == ChannelsTreeItem.Channel:
             submenu.addAction("Add to common Y axis")
             submenu.addAction("Remove from common Y axis")
+            submenu.addSeparator()
+            # Macht den Strip zum XY-Strip: dieses Signal steht dann
+            # auf der x-Achse, alle anderen werden darueber gezeichnet.
+            submenu.addAction("Define as X axis")
+            if getattr(getattr(self, "owner_plot", None), "xy_mode", False):
+                submenu.addAction("Back to time axis")
         menu.addMenu(submenu)
         menu.addSeparator()
 
@@ -1690,6 +1723,16 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             window = self.plot
             if hasattr(window, "move_selection_to_new_strip"):
                 window.move_selection_to_new_strip(self, -1 if action_text.endswith("above") else 1)
+
+        elif action_text == "Define as X axis":
+            strip = getattr(self, "owner_plot", None)
+            if item is not None and strip is not None and hasattr(self.plot, "set_x_signal"):
+                self.plot.set_x_signal(strip, item.uuid)
+
+        elif action_text == "Back to time axis":
+            strip = getattr(self, "owner_plot", None)
+            if strip is not None and hasattr(self.plot, "set_window_mode"):
+                self.plot.set_window_mode(strip, "analog")
 
         elif action_text == "Set enum colors":
             # Die Farben haengen an der Wertetabelle, nicht am Kanal - der
@@ -2827,9 +2870,22 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                 elif fmt == "phys":
                     self.fmt = "{}"
 
+    def set_x_axis_mark(self, state):
+        """Rotes X vor dem Namen - dieses Signal stellt die x-Achse."""
+        if self.type() != self.Channel:
+            return
+
+        if bool(state) == bool(getattr(self, "_x_axis_mark", False)):
+            return
+
+        self._x_axis_mark = bool(state)
+        self._set_icon()
+
     def _set_icon(self):
         if self.type() == self.Channel:
-            if not self.exists:
+            if getattr(self, "_x_axis_mark", False):
+                icon = x_axis_icon()
+            elif not self.exists:
                 icon = utils.ERROR_ICON
             elif self.signal.flags & Signal.Flags.computed:
                 icon = utils.COMPUTED_ICON

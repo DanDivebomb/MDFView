@@ -474,10 +474,14 @@ class ViewBoxWithCursor(pg.ViewBox):
         x_range = tl.x(), br.x()
         y_range = br.y(), tl.y()
 
+        # Im XY-Strip ist der Cursorwert eine Zeit, die x-Achse aber
+        # ein Signalwert - darauf zu zentrieren wuerde den Ausschnitt
+        # irgendwohin werfen.
         if (
             self._settings.value("plot/zoom/x_center_on_cursor", True, type=bool)
             and self.cursor is not None
             and self.cursor.isVisible()
+            and not getattr(self.plot, "xy_mode", False)
         ):
             delta = x_range[1] - x_range[0]
 

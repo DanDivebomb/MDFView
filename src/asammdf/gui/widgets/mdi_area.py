@@ -4276,6 +4276,7 @@ class WithMDIArea:
         plot._pending_strip_count = window_info["configuration"].get("strip_count", 0)
         plot._pending_strip_digital = window_info["configuration"].get("strip_digital", [])
         plot._pending_strip_modes = window_info["configuration"].get("strip_modes", [])
+        plot._pending_strip_x_channels = window_info["configuration"].get("strip_x_channels", [])
 
         plot.add_new_channels(signals, mime_data)
 
