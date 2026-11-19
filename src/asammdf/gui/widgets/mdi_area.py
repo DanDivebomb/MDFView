@@ -1034,7 +1034,7 @@ class MdiAreaWidget(MdiAreaMixin, QtWidgets.QMdiArea):
                     options=(
                         ("Plot", "Numeric")
                         if self.comparison
-                        else ("Plot", "Numeric", "Numeric scalar", "Tabular")
+                        else ("Plot", "Numeric", "Numeric scalar", "Tabular", "XY")
                     ),
                     parent=self,
                 )
@@ -3365,7 +3365,18 @@ class WithMDIArea:
         self.windows_modified.emit()
 
     def _add_xy_window(self, signals):
-        signals = [sig[:3] for sig in signals]
+        # Die Kanaele kommen je nach Weg als Beschreibung (Ziehen auf
+        # die leere Flaeche, Konfiguration) oder als Tupel herein. Die
+        # ersten beiden werden X und Y, in der Reihenfolge der Auswahl.
+        eintraege = []
+        for sig in signals:
+            if isinstance(sig, dict):
+                eintraege.append((sig["name"], sig["group_index"], sig["channel_index"]))
+            else:
+                eintraege.append(tuple(sig[:3]))
+
+        signals = eintraege[:2]
+
         if len(signals) == 2:
             x_channel, y_channel = self.mdf.select(signals, validate=True)
         else:

@@ -9,6 +9,12 @@ from ..ui.xy import Ui_XYDisplay
 
 ARROW = pg.arrayToQPath(np.array([0.0, -1.0, 0.0, -1.0, 0.0]), np.array([0.0, 1.0, 0.0, -1.0, 0.0]), connect="all")
 
+# Hoechstzahl der Richtungspfeile auf der Kurve. Einer je Messpunkt
+# macht aus einer langen Messung einen Teppich, unter dem die Kurve
+# verschwindet - und jeder Pfeil wird einzeln gedreht, was bei
+# hunderttausend Punkten spuerbar dauert.
+MAX_ARROWS = 200
+
 
 class XY(Ui_XYDisplay, QtWidgets.QWidget):
     add_channels_request = QtCore.Signal(list)
@@ -184,29 +190,37 @@ class XY(Ui_XYDisplay, QtWidgets.QWidget):
     def set_timestamp(self, stamp, emit=True, spinbox=False):
         if stamp is None or self._timebase is None or not len(self._timebase):
             self.marker.setData(x=[], y=[])
+            self.x.setText("n.a.")
+            self.y.setText("n.a.")
 
         else:
-            idx = np.searchsorted(self._timebase, stamp, side="right") - 1
+            idx = int(np.searchsorted(self._timebase, stamp, side="right")) - 1
+
+            # Liegt der Zeitpunkt vor dem ersten Messpunkt, liefert die
+            # Suche -1. In Python waere das der LETZTE Eintrag, und der
+            # Ausschnitt daneben bliebe leer - genau daher kam der
+            # IndexError. Also auf den gueltigen Bereich begrenzen.
+            idx = min(max(idx, 0), len(self._timebase) - 1)
 
             new_stamp = self._timebase[idx]
 
             if spinbox:
-                if new_stamp == self._timestamp and stamp > new_stamp:
+                if new_stamp == self._timestamp and stamp > new_stamp and idx + 1 < len(self._timebase):
                     idx += 1
                     new_stamp = self._timebase[idx]
 
             stamp = new_stamp
 
-            x = self._x_interp.samples[idx : idx + 1]
-            y = self._y_interp.samples[idx : idx + 1]
+            x = self._x_interp.samples[idx : idx + 1] if self._x_interp is not None else []
+            y = self._y_interp.samples[idx : idx + 1] if self._y_interp is not None else []
 
             self.marker.setData(
                 x=x,
                 y=y,
             )
 
-            self.x.setText(str(x[0]))
-            self.y.setText(str(y[0]))
+            self.x.setText(str(x[0]) if len(x) else "n.a.")
+            self.y.setText(str(y[0]) if len(y) else "n.a.")
 
             self._inhibit = True
             self.timestamp_slider.setValue(idx)
@@ -286,7 +300,7 @@ class XY(Ui_XYDisplay, QtWidgets.QWidget):
                     self._timebase = t = x.timestamps
                     self._x_interp = x
                     self._y_interp = y = y.interp(t)
-                case "X channel timestamps":
+                case "Y channel timestamps":
                     self._timebase = t = y.timestamps
                     self._x_interp = x = x.interp(t)
                     self._y_interp = y
@@ -308,14 +322,18 @@ class XY(Ui_XYDisplay, QtWidgets.QWidget):
                     "brush": self._pen,
                 }
             ]
-            for angle, xpos, ypos in zip(angles.tolist(), x.samples[1:].tolist(), y.samples[1:].tolist(), strict=False):
+            # Gleichmaessig ueber die Kurve verteilt, nicht an jedem
+            # Messpunkt - siehe MAX_ARROWS oben.
+            schritt = max(1, (len(angles) + MAX_ARROWS - 1) // MAX_ARROWS)
+
+            for i in range(1, len(x.samples), schritt):
                 transform.reset()
-                angle_rot = transform.rotate(angle)
+                angle_rot = transform.rotate(float(angles[i - 1]))
                 my_rotated_symbol = angle_rot.map(ARROW)
 
                 exit_spots.append(
                     {
-                        "pos": (xpos, ypos),
+                        "pos": (float(x.samples[i]), float(y.samples[i])),
                         "symbol": my_rotated_symbol,
                         "size": 6,
                         "pen": self._pen,

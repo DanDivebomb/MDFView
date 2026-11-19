@@ -2170,7 +2170,7 @@ MultiRasterSeparator;&
 
         if window_type is None:
             return
-        elif window_type in ("CAN Bus Trace", "FlexRay Bus Trace", "LIN Bus Trace", "XY"):
+        elif window_type in ("CAN Bus Trace", "FlexRay Bus Trace", "LIN Bus Trace"):
             signals = []
         elif window_type == "GPS":
             target = "(latitude|gps_y)"
