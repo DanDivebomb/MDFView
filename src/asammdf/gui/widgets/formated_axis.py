@@ -559,7 +559,36 @@ class FormatedAxis(pg.AxisItem):
 
                 self.setRange(mid - delta / 2, mid + delta / 2)
         else:
-            return self.linkedView().mouseDragEvent(event, axis=0, ignore_cursor=True)
+            # Ziehen auf der Zeitachse verschiebt die Zeit (linke Taste)
+            # oder dehnt sie (rechte Taste) - genau wie bei den
+            # Werteachsen daneben. Vorher ging das Ereignis an die
+            # Zeichenflaeche, die daraus einen Zoomrahmen gemacht hat:
+            # wer die Zeitleiste knapp verfehlt hat, bekam einen Zoom
+            # statt einer Verschiebung.
+            view = self.linkedView()
+            if view is None:
+                return
+
+            event.accept()
+
+            breite = self.sceneBoundingRect().width() or 1
+            x0, x1 = view.viewRange()[0]
+            spanne = x1 - x0
+            weg = event.pos().x() - event.lastPos().x()
+
+            if event.button() in (
+                QtCore.Qt.MouseButton.LeftButton,
+                QtCore.Qt.MouseButton.MiddleButton,
+            ):
+                delta = spanne / breite * weg
+                view.setXRange(x0 - delta, x1 - delta, padding=0)
+
+            elif event.button() & QtCore.Qt.MouseButton.RightButton:
+                mitte = (x0 + x1) / 2
+                spanne = spanne * (0.94 if weg > 0 else 1.06)
+                view.setXRange(mitte - spanne / 2, mitte + spanne / 2, padding=0)
+
+            return
 
     def mouseClickEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.RightButton:

@@ -280,7 +280,9 @@ class TimevaseOverview(QtWidgets.QWidget):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.setFixedHeight(16)
+        # Etwas hoeher als noetig: direkt darueber liegt die Zeitachse,
+        # und wer die Leiste knapp verfehlt, zieht dort an der Achse.
+        self.setFixedHeight(20)
         self.setMouseTracking(False)
         self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self.setToolTip("Ausschnitt verschieben: ziehen oder klicken")
@@ -288,6 +290,18 @@ class TimevaseOverview(QtWidgets.QWidget):
         self._x_range = (0, 1)
         self._timebase = None
         self._drag_offset = None
+        self._drag_span = None
+        self._hover = False
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
 
     @property
     def x_range(self):
@@ -314,6 +328,12 @@ class TimevaseOverview(QtWidgets.QWidget):
         falls man darueber hinaus gescrollt hat, auch den sichtbaren
         Bereich. Gibt (Anfang, Ende, Breite) zurueck oder None.
         """
+        # Waehrend des Ziehens bleibt der Massstab stehen. Sonst
+        # aendert sich mit dem Ausschnitt auch der dargestellte
+        # Gesamtbereich, und die Leiste rutscht unter der Maus weg.
+        if self._drag_span is not None:
+            return self._drag_span
+
         if self.timebase is None:
             return None
 
@@ -364,8 +384,9 @@ class TimevaseOverview(QtWidgets.QWidget):
             super().mousePressEvent(event)
             return
 
+        bereich = self.span()
         zeit = self.time_at(event.position().x())
-        if zeit is None:
+        if zeit is None or bereich is None:
             return
 
         mitte = (self.x_range[0] + self.x_range[1]) / 2
@@ -377,6 +398,7 @@ class TimevaseOverview(QtWidgets.QWidget):
             self._drag_offset = 0.0
             self.move_to(zeit)
 
+        self._drag_span = bereich
         self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
@@ -390,6 +412,7 @@ class TimevaseOverview(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, event):
         self._drag_offset = None
+        self._drag_span = None
         self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         super().mouseReleaseEvent(event)
 
@@ -428,8 +451,9 @@ class TimevaseOverview(QtWidgets.QWidget):
                 QtCore.QPointF(t_end, height / 2),
             )
 
-            pen = fn.mkPen("#0000ff7f")
-            brush = fn.mkBrush("#0000ff7f")
+            farbe = "#4b4bffbf" if self._hover else "#0000ff7f"
+            pen = fn.mkPen(farbe)
+            brush = fn.mkBrush(farbe)
             painter.setPen(pen)
             painter.setBrush(brush)
             painter.drawRect(
