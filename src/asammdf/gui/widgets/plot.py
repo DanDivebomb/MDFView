@@ -143,6 +143,23 @@ HERE = Path(__file__).resolve().parent
 
 NOT_FOUND = 0xFFFFFFFF
 
+# Liniendicke und -art je Signal. 0 heisst: globale Einstellung benutzen,
+# "" heisst durchgezogen - so bleibt alles wie bisher, solange niemand
+# etwas anderes waehlt.
+LINE_WIDTHS = {
+    "thin": 0,
+    "thick": 3,
+    "very thick": 5,
+}
+
+LINE_STYLES = {
+    "": QtCore.Qt.PenStyle.SolidLine,
+    "solid": QtCore.Qt.PenStyle.SolidLine,
+    "dashed": QtCore.Qt.PenStyle.DashLine,
+    "dotted": QtCore.Qt.PenStyle.DotLine,
+    "dash-dot": QtCore.Qt.PenStyle.DashDotLine,
+}
+
 # Hoehe der Knopfreihe eines Strips. Der Spaltenkopf der Kanalliste
 # bekommt dieselbe, damit beide Spalten gleich hoch anfangen.
 STRIP_BAR_HEIGHT = 26
@@ -516,6 +533,12 @@ class PlotSignal(Signal):
         # Gesperrte Signale behalten ihren Y-Bereich, egal was Fit, Home,
         # Zoom oder die gemeinsame Achse damit vorhaben.
         self._y_locked = False
+
+        # Eigene Liniendicke und -art. 0 bzw. "" bedeutet: so zeichnen
+        # wie bisher, also nach der globalen Einstellung.
+        self.line_width = 0
+        self.line_style = ""
+
         self.y_range = (0, -1)
         self.home = (0, -1)
 
@@ -2411,6 +2434,14 @@ class Plot(QtWidgets.QWidget):
 
                 if description.get("y_locked", False):
                     item.setCheckState(item.LockColumn, QtCore.Qt.CheckState.Checked)
+
+                breite = description.get("line_width", 0)
+                if breite:
+                    item.signal.line_width = int(breite)
+
+                stil = description.get("line_style", "")
+                if stil in LINE_STYLES:
+                    item.signal.line_style = stil
 
                 item.precision = description.get("precision", 3)
 
@@ -4346,6 +4377,14 @@ class Plot(QtWidgets.QWidget):
 
         channel["y_range"] = [float(e) for e in sig.y_range]
         channel["y_locked"] = bool(sig.y_locked)
+
+        # Nur eintragen, wenn vom Standard abgewichen wird - alte
+        # Konfigurationen bleiben dadurch unveraendert lesbar.
+        if getattr(sig, "line_width", 0):
+            channel["line_width"] = int(sig.line_width)
+
+        if getattr(sig, "line_style", ""):
+            channel["line_style"] = str(sig.line_style)
         channel["origin_uuid"] = str(sig.origin_uuid)
 
         if sig.flags & Signal.Flags.user_defined_conversion:
@@ -7965,9 +8004,15 @@ class PlotGraphics(pg.PlotWidget):
 
                     x, y = self.scale_curve_to_pixmap(x, y, y_range=sig.y_range, x_start=x_start)
 
-                    sig.pen.setWidth(pen_width)
+                    # Eigene Dicke und Linienart des Signals gehen vor.
+                    # Gezeichnet wird mit einer Kopie des Stifts, damit
+                    # die Achsen ihren eigenen behalten - sie benutzen
+                    # dasselbe Objekt.
+                    stift = QtGui.QPen(sig.pen)
+                    stift.setWidth(getattr(sig, "line_width", 0) or pen_width)
+                    stift.setStyle(LINE_STYLES.get(getattr(sig, "line_style", ""), QtCore.Qt.PenStyle.SolidLine))
 
-                    paint.setPen(sig.pen)
+                    paint.setPen(stift)
 
                     pth = self.generatePath(x, y, sig)
 

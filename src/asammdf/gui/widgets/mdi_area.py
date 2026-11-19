@@ -156,7 +156,7 @@ def deepcopy_cfg_item(item):
                 new_item[key] = deepcopy(item[key])
 
     # eigene Felder (Stripnummer, Y-Sperre) muessen die Kopie ueberleben
-    for key in ("strip", "y_locked"):
+    for key in ("strip", "y_locked", "line_width", "line_style"):
         if key in item:
             new_item[key] = item[key]
 

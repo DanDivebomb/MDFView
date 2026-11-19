@@ -487,6 +487,70 @@ class Delegate(QtWidgets.QItemDelegate):
         super().paint(painter, option, index)
 
 
+class SignalStyleDialog(QtWidgets.QDialog):
+    """Farbe, Liniendicke und Linienart in einem Fenster.
+
+    Der Farbwaehler von Qt haengt als Widget mit drin, darunter die
+    beiden Auswahlfelder - so steht das Aussehen eines Signals an
+    einer Stelle beisammen.
+    """
+
+    WIDTHS = (("Thin", 0), ("Thick", 3), ("Very thick", 5))
+    STYLES = (("Solid", "solid"), ("Dashed", "dashed"), ("Dotted", "dotted"))
+
+    def __init__(self, color, line_width=0, line_style="", parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Signal appearance")
+
+        self.picker = QtWidgets.QColorDialog(QtGui.QColor(color), self)
+        self.picker.setOptions(
+            QtWidgets.QColorDialog.ColorDialogOption.DontUseNativeDialog
+            | QtWidgets.QColorDialog.ColorDialogOption.NoButtons
+        )
+        self.picker.setWindowFlags(QtCore.Qt.WindowType.Widget)
+
+        self.width_box = QtWidgets.QComboBox()
+        for text, wert in self.WIDTHS:
+            self.width_box.addItem(text, wert)
+        self.width_box.setCurrentIndex(self._index(self.WIDTHS, int(line_width or 0)))
+
+        self.style_box = QtWidgets.QComboBox()
+        for text, wert in self.STYLES:
+            self.style_box.addItem(text, wert)
+        self.style_box.setCurrentIndex(self._index(self.STYLES, line_style or "solid"))
+
+        felder = QtWidgets.QFormLayout()
+        felder.addRow("Line width", self.width_box)
+        felder.addRow("Line style", self.style_box)
+
+        knoepfe = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        knoepfe.accepted.connect(self.accept)
+        knoepfe.rejected.connect(self.reject)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.picker)
+        layout.addLayout(felder)
+        layout.addWidget(knoepfe)
+
+    @staticmethod
+    def _index(eintraege, wert):
+        for i, (_text, kandidat) in enumerate(eintraege):
+            if kandidat == wert:
+                return i
+        return 0
+
+    def chosen(self):
+        """(Farbe, Liniendicke, Linienart) - Farbe ungueltig heisst: unveraendert."""
+        return (
+            self.picker.currentColor(),
+            self.width_box.currentData(),
+            self.style_box.currentData(),
+        )
+
+
 class ChannelsTreeFlags(IntFlag):
     DetailsEnabled = 1
     HideMissingChannels = 1 << 1
@@ -881,6 +945,26 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         self.update_channel_groups_count()
 
+    def _set_line_property(self, feld, wert):
+        """Liniendicke oder -art fuer alle markierten Kanaele setzen."""
+        betroffen = False
+
+        for item in self.selectedItems():
+            if item.type() != ChannelsTreeItem.Channel:
+                continue
+
+            setattr(item.signal, feld, wert)
+            betroffen = True
+
+        if not betroffen:
+            return
+
+        # Der Strip zeichnet seine Kurven aus einem gemerkten Bild -
+        # ohne update() bliebe die alte Linie stehen.
+        strip = getattr(self, "owner_plot", None)
+        if strip is not None:
+            strip.update()
+
     def keyPressEvent(self, event):
         key = event.key()
         modifiers = event.modifiers()
@@ -1001,18 +1085,38 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             if not selected_items:
                 return
             else:
+                breite, stil = 0, ""
                 for item in selected_items:
                     if item.type() == item.Channel:
                         color = item.color
+                        breite = getattr(item.signal, "line_width", 0)
+                        stil = getattr(item.signal, "line_style", "")
                         break
                 else:
                     color = QtGui.QColor("#ffffff")
 
-            color = QtWidgets.QColorDialog.getColor(color, parent=self)
-            if color.isValid():
-                for item in selected_items:
-                    if item.type() != item.Info:
-                        item.color = color
+            # Farbe, Dicke und Linienart in einem Fenster - gefragt
+            # wird immer alles, uebernommen wird nur das Gewaehlte.
+            dialog = SignalStyleDialog(color, breite, stil, parent=self)
+            if not dialog.exec():
+                return
+
+            color, breite, stil = dialog.chosen()
+
+            for item in selected_items:
+                if item.type() == item.Info:
+                    continue
+
+                if color.isValid():
+                    item.color = color
+
+                if item.type() == item.Channel:
+                    item.signal.line_width = breite
+                    item.signal.line_style = "" if stil == "solid" else stil
+
+            strip = getattr(self, "owner_plot", None)
+            if strip is not None:
+                strip.update()
 
         elif modifiers == QtCore.Qt.KeyboardModifier.ControlModifier and key == QtCore.Qt.Key.Key_X:
             event.accept()
@@ -1366,6 +1470,25 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         action.setShortcut(QtGui.QKeySequence("C"))
         submenu.addAction(action)
         submenu.addAction("Set random color")
+
+        # Liniendicke und -art stehen bewusst neben der Farbe: es ist
+        # dieselbe Frage, naemlich wie das Signal aussehen soll.
+        if item and item.type() == ChannelsTreeItem.Channel:
+            breite_menue = QtWidgets.QMenu("Line width", submenu)
+            jetzige_breite = int(getattr(item.signal, "line_width", 0) or 0)
+            for text, wert in (("Thin", 0), ("Thick", 3), ("Very thick", 5)):
+                eintrag = breite_menue.addAction(text)
+                eintrag.setCheckable(True)
+                eintrag.setChecked(jetzige_breite == wert)
+            submenu.addMenu(breite_menue)
+
+            stil_menue = QtWidgets.QMenu("Line style", submenu)
+            jetziger_stil = getattr(item.signal, "line_style", "") or "solid"
+            for text, wert in (("Solid", "solid"), ("Dashed", "dashed"), ("Dotted", "dotted")):
+                eintrag = stil_menue.addAction(text)
+                eintrag.setCheckable(True)
+                eintrag.setChecked(jetziger_stil == wert)
+            submenu.addMenu(stil_menue)
         submenu.addAction("Set precision")
         action = QtGui.QAction("Set color ranges", submenu)
         action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
@@ -1723,6 +1846,12 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             window = self.plot
             if hasattr(window, "move_selection_to_new_strip"):
                 window.move_selection_to_new_strip(self, -1 if action_text.endswith("above") else 1)
+
+        elif action_text in ("Thin", "Thick", "Very thick"):
+            self._set_line_property("line_width", {"Thin": 0, "Thick": 3, "Very thick": 5}[action_text])
+
+        elif action_text in ("Solid", "Dashed", "Dotted"):
+            self._set_line_property("line_style", action_text.lower())
 
         elif action_text == "Define as X axis":
             strip = getattr(self, "owner_plot", None)
