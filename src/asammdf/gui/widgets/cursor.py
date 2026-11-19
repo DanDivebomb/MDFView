@@ -152,6 +152,11 @@ class Bookmark(pg.InfiniteLine):
 
             rect = plot.viewbox.sceneBoundingRect()
             delta = rect.x()
+            # Senkrechter Versatz der Zeichenflaeche im Widget. Die
+            # Kurven werden an genau dieser Stelle gezeichnet, Cursor
+            # und Bereich muessen also denselben Versatz benutzen -
+            # sonst sitzen sie ein paar Punkte zu hoch.
+            oben = rect.y()
             height = rect.height()
 
             px, py = plot.px, plot.py
@@ -165,7 +170,7 @@ class Bookmark(pg.InfiniteLine):
                 y_range=plot.viewbox.viewRange()[1],
                 x_start=plot.viewbox.viewRange()[0][0],
             )
-            paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, height))
+            paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + height))
 
             rect = self.label.textItem.sceneBoundingRect()
 
@@ -326,6 +331,11 @@ class Cursor(pg.InfiniteLine):
 
             rect = plot.viewbox.sceneBoundingRect()
             delta = rect.x()
+            # Senkrechter Versatz der Zeichenflaeche im Widget. Die
+            # Kurven werden an genau dieser Stelle gezeichnet, Cursor
+            # und Bereich muessen also denselben Versatz benutzen -
+            # sonst sitzen sie ein paar Punkte zu hoch.
+            oben = rect.y()
             height = rect.height()
             width = rect.x() + rect.width()
 
@@ -341,7 +351,7 @@ class Cursor(pg.InfiniteLine):
                     y_range=plot.viewbox.viewRange()[1],
                     x_start=plot.viewbox.viewRange()[0][0],
                 )
-                paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, height))
+                paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + height))
 
             else:
                 signal, idx = plot.signal_by_uuid(uuid)
@@ -357,21 +367,21 @@ class Cursor(pg.InfiniteLine):
                         )
 
                         if self.show_circle:
-                            paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, y - 5))
-                            paint.drawLine(QtCore.QPointF(x + delta, y + 5), QtCore.QPointF(x + delta, height))
+                            paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + y - 5))
+                            paint.drawLine(QtCore.QPointF(x + delta, oben + y + 5), QtCore.QPointF(x + delta, oben + height))
 
                             if self.show_horizontal_line:
-                                paint.drawLine(QtCore.QPointF(delta, y), QtCore.QPointF(x + delta - 5, y))
-                                paint.drawLine(QtCore.QPointF(x + delta + 5, y), QtCore.QPointF(width, y))
+                                paint.drawLine(QtCore.QPointF(delta, oben + y), QtCore.QPointF(x + delta - 5, oben + y))
+                                paint.drawLine(QtCore.QPointF(x + delta + 5, oben + y), QtCore.QPointF(width, oben + y))
 
                             paint.setRenderHints(paint.RenderHint.Antialiasing, True)
-                            paint.drawEllipse(QtCore.QPointF(x + delta, y), 5, 5)
+                            paint.drawEllipse(QtCore.QPointF(x + delta, oben + y), 5, 5)
                             paint.setRenderHints(paint.RenderHint.Antialiasing, False)
 
                         else:
-                            paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, height))
+                            paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + height))
                             if self.show_horizontal_line:
-                                paint.drawLine(QtCore.QPointF(delta, y), QtCore.QPointF(width, y))
+                                paint.drawLine(QtCore.QPointF(delta, oben + y), QtCore.QPointF(width, oben + y))
 
                     else:
                         x, y = plot.scale_curve_to_pixmap(
@@ -380,7 +390,7 @@ class Cursor(pg.InfiniteLine):
                             y_range=plot.viewbox.viewRange()[1],
                             x_start=plot.viewbox.viewRange()[0][0],
                         )
-                        paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, height))
+                        paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + height))
                 else:
                     x, y = plot.scale_curve_to_pixmap(
                         position,
@@ -388,7 +398,7 @@ class Cursor(pg.InfiniteLine):
                         y_range=plot.viewbox.viewRange()[1],
                         x_start=plot.viewbox.viewRange()[0][0],
                     )
-                    paint.drawLine(QtCore.QPointF(x + delta, 0), QtCore.QPointF(x + delta, height))
+                    paint.drawLine(QtCore.QPointF(x + delta, oben), QtCore.QPointF(x + delta, oben + height))
 
             plot.px, plot.py = px, py
 
@@ -507,6 +517,11 @@ class Region(pg.LinearRegionItem):
         if plot:
             rect = plot.viewbox.sceneBoundingRect()
             delta = rect.x()
+            # Senkrechter Versatz der Zeichenflaeche im Widget. Die
+            # Kurven werden an genau dieser Stelle gezeichnet, Cursor
+            # und Bereich muessen also denselben Versatz benutzen -
+            # sonst sitzen sie ein paar Punkte zu hoch.
+            oben = rect.y()
             height = rect.height()
 
             px, py = plot.px, plot.py
@@ -529,7 +544,7 @@ class Region(pg.LinearRegionItem):
 
             rect = QtCore.QRectF(
                 x1 + delta,
-                0,
+                oben,
                 x2 - x1,
                 height,
             )
