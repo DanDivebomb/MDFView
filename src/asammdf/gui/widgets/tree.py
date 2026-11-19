@@ -2483,6 +2483,11 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setForeground(self.IndividualAxisColumn, value)
             self.setForeground(self.UnitColumn, value)
             self.setForeground(self.OriginColumn, value)
+            # Die Schlossspalte gehoert dazu. Fehlt sie hier, behaelt
+            # genau diese Zelle die alte Farbe - und weil die Auswahl
+            # je Zelle in der Signalfarbe hinterlegt wird, bleibt beim
+            # Markieren ein Feld in der vorigen Farbe stehen.
+            self.setForeground(self.LockColumn, value)
 
             if self.details is not None:
                 self.details.color = value
@@ -2506,6 +2511,11 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setForeground(self.IndividualAxisColumn, value)
             self.setForeground(self.UnitColumn, value)
             self.setForeground(self.OriginColumn, value)
+            # Die Schlossspalte gehoert dazu. Fehlt sie hier, behaelt
+            # genau diese Zelle die alte Farbe - und weil die Auswahl
+            # je Zelle in der Signalfarbe hinterlegt wird, bleibt beim
+            # Markieren ein Feld in der vorigen Farbe stehen.
+            self.setForeground(self.LockColumn, value)
 
     @property
     def comment(self):
