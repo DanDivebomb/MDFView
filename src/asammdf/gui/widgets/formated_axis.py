@@ -40,6 +40,8 @@ BUTTON_SIZE = 16
 class FormatedAxis(pg.AxisItem):
     rangeChanged = QtCore.Signal(object, object)
     scale_editor_requested = QtCore.Signal(object)
+    # Breite der Skala wurde mit der Maus gezogen
+    width_changed = QtCore.Signal(object)
 
     def __init__(self, *args, **kwargs):
         self.plus = self.minus = None
@@ -113,6 +115,23 @@ class FormatedAxis(pg.AxisItem):
     def tick_width(self):
         """Eingestellte Breite der Skala, ohne die Achsenbeschriftung."""
         return self.fixedWidth if self.fixedWidth is not None else self.width()
+
+    def stored_width(self):
+        """Breite fuer die Konfiguration - ohne die Achsenbeschriftung.
+
+        width() liefert die ganze sichtbare Breite, also Skala plus
+        Beschriftung. Wird dieser Wert gespeichert und beim naechsten
+        Laden wieder als Skalenbreite gesetzt, kommt die Beschriftung
+        erneut dazu: die Achse wuchs mit jedem Laden um ihre Dicke.
+        """
+        if self.fixedWidth is not None:
+            return float(self.fixedWidth)
+
+        breite = float(self.width())
+        if self.label is not None and self.label.isVisible():
+            breite -= self.label.boundingRect().height() * 0.8
+
+        return max(breite, 10.0)
 
     def _updateWidth(self):
         """Auch bei fester Breite Platz fuer die Achsenbeschriftung lassen.
@@ -332,6 +351,9 @@ class FormatedAxis(pg.AxisItem):
 
     def place_label(self, oben, unten):
         """Beschriftung mittig in den nutzbaren Bereich setzen."""
+        if self.label is None:
+            return
+
         breite = self.label.boundingRect().width()
 
         pos = self.label.pos()
@@ -349,6 +371,11 @@ class FormatedAxis(pg.AxisItem):
         gezeichnet wird HTML, und was pyqtgraph dabei noch anhaengt,
         laesst sich von aussen nicht zuverlaessig abschaetzen.
         """
+        # Beim Schliessen des Fensters ist die Beschriftung schon weg,
+        # die Zeitgeber laufen aber noch einmal ab.
+        if self.label is None:
+            return
+
         marke = f"refit    id={id(self) % 10000} lage={self.orientation}"
 
         if getattr(self, "_fitting", False):
@@ -513,6 +540,11 @@ class FormatedAxis(pg.AxisItem):
             if event.isFinish():
                 self._width_drag = False
                 self._width_at_press = None
+                # Alle Strips eines Fensters halten dieselbe
+                # Skalenbreite - sonst beginnen die
+                # Zeichenflaechen untereinander an verschiedenen
+                # Stellen.
+                self.width_changed.emit(self.tick_width())
 
             return
 

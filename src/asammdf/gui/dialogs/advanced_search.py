@@ -6,6 +6,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...blocks.utils import extract_xml_comment
+from ..mdfview_geometry import remember_geometry
 from ..ui.search_dialog import Ui_SearchDialog
 from .messagebox import MessageBox
 from .range_editor import RangeEditor
@@ -347,7 +348,8 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
         self.show_alias_btn.clicked.connect(self.show_overlapping_alias)
         self.update_pattern_matches()
 
-        self.showMaximized()
+        # Nicht mehr bildschirmfuellend: die Groesse vom letzten Mal.
+        remember_geometry(self, "advanced_search", (1100, 800))
 
     def search_text_changed(self):
         text = self.search_box.text().strip()

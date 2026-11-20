@@ -81,6 +81,28 @@ def _process_dict(d):
     return new_d
 
 
+def wildcard_pattern(text):
+    """Suchtext mit * und ? als Platzhalter in ein Suchmuster umsetzen.
+
+    So wie im Explorer, in INCA oder MDA: * steht fuer beliebig viele
+    Zeichen, ? fuer genau eines, alles andere gilt woertlich. Vorher
+    ging der Text unveraendert als regulaerer Ausdruck durch - "EngTq*Sp"
+    bedeutete dort "EngT, dann beliebig viele q, dann Sp" und fand
+    EngTqIndcdSp gerade nicht.
+    """
+    teile = []
+
+    for zeichen in text:
+        if zeichen == "*":
+            teile.append(".*")
+        elif zeichen == "?":
+            teile.append(".")
+        else:
+            teile.append(re.escape(zeichen))
+
+    return "".join(teile)
+
+
 FRIENDLY_ATRRIBUTES = {
     "author": "Author",
     "subject": "Subject",
@@ -607,7 +629,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         error_text_color = QtGui.QPalette()
         error_text_color.setColor(QtGui.QPalette.Text, QtCore.Qt.red)
         try:
-            name_pattern = re.compile(".*" + search_name.text().strip() + ".*", re.IGNORECASE)
+            name_pattern = re.compile(
+                ".*" + wildcard_pattern(search_name.text().strip()) + ".*", re.IGNORECASE
+            )
             search_name.pattern = name_pattern
             search_name.pattern = name_pattern
             search_name.setPalette(valid_text_color)
@@ -616,7 +640,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             do_update = False
 
         try:
-            bus_pattern = ".*" + search_bus.text().strip() + ".*"
+            bus_pattern = ".*" + wildcard_pattern(search_bus.text().strip()) + ".*"
             if bus_pattern.islower():
                 bus_pattern = re.compile(bus_pattern, re.IGNORECASE)
             else:
@@ -1136,6 +1160,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         config["functions"] = self.functions
         config["global_variables"] = "\n".join([line for line in self.global_variables.splitlines() if line])
 
+        # Parameter: Skalare, Kennlinien und Kennfelder als Daten
+        config["parameters"] = self.parameters
+
         # Merken, zu welcher Messdatei diese Konfiguration gehoert. Beim
         # Oeffnen der Konfiguration aus dem leeren Programm heraus wird
         # die Datei dann gleich mitgeladen.
@@ -1571,6 +1598,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                         "active_window": "Plot 0",
                         "functions": {},
                         "global_variables": "",
+                        "parameters": {},
                     }
 
             elif extension == ".dspf":
@@ -1719,16 +1747,28 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             mdfview_enums.from_config(info.get("enum_colors"))
             self.restore_channels_state(info)
 
+            # Nur leere Zeilen fallen weg. Die Einrueckung muss bleiben:
+            # im Block der globalen Variablen darf auch def stehen, und
+            # strip() pro Zeile hat solche Funktionen beim Laden
+            # zerstoert (IndentationError).
             new_global_vars = "\n".join(
-                line.strip() for line in info.get("global_variables", "").splitlines() if line.strip()
+                line for line in info.get("global_variables", "").splitlines() if line.strip()
             )
-            global_vars = "\n".join(line.strip() for line in self.global_variables.splitlines() if line.strip())
+            global_vars = "\n".join(line for line in self.global_variables.splitlines() if line.strip())
 
-            if new_global_vars not in global_vars:
-                global_vars += new_global_vars
+            if new_global_vars and new_global_vars not in global_vars:
+                # mit Zeilenumbruch dazwischen - sonst klebt die letzte
+                # Zeile des einen am Anfang des anderen
+                global_vars = f"{global_vars}\n{new_global_vars}" if global_vars else new_global_vars
                 updated_global_vars = True
             else:
                 updated_global_vars = False
+
+            # Parameter der Konfiguration dazunehmen. Gleiche Namen
+            # gewinnen aus der neuen Konfiguration.
+            geladene_parameter = info.get("parameters") or {}
+            if geladene_parameter:
+                self.parameters.update(geladene_parameter)
 
             new_functions = {}
 

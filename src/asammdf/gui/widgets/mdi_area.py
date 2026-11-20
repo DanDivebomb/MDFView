@@ -36,6 +36,7 @@ from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.channel_info import ChannelInfoDialog
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.window_selection_dialog import WindowSelectionDialog
+from ..mdfview_parameters import parameters_to_code, used_in
 from ..serde import extract_mime_names
 from ..utils import (
     computation_to_python_function,
@@ -1230,6 +1231,10 @@ class WithMDIArea:
         self.functions = {}
         self.global_variables = ""
 
+        # Parameter der Konfiguration: Skalare, Kennlinien, Kennfelder.
+        # Daten, nicht Code - den Code dazu macht mdfview_parameters.
+        self.parameters = {}
+
     def add_pattern_group(self, plot, group):
         signals = extract_signals_using_pattern(
             mdf=self.mdf,
@@ -1643,7 +1648,7 @@ class WithMDIArea:
                             required_channels,
                             all_timebase,
                             self.functions,
-                            self.global_variables,
+                            self.effective_global_variables(),
                         )
                         signal.name = channel["name"]
                         signal.unit = channel["unit"]
@@ -3028,7 +3033,7 @@ class WithMDIArea:
                     required_channels,
                     all_timebase,
                     self.functions,
-                    self.global_variables,
+                    self.effective_global_variables(),
                 )
                 signal.name = channel["name"]
                 signal.unit = channel["unit"]
@@ -3463,14 +3468,73 @@ class WithMDIArea:
         for mdi in self.all_sub_windows():
             wid = mdi.widget()
             if isinstance(wid, Plot):
-                iterator = QtWidgets.QTreeWidgetItemIterator(wid.channel_selection)
-                while item := iterator.value():
-                    if item.type() == item.Channel:
-                        if item.signal.flags & item.signal.Flags.computed:
-                            if item.signal.computation["function"] in deleted:
-                                self.edit_channel(wid.channel_item_to_config(item), item, wid)
+                for item in self.computed_items(wid):
+                    if item.signal.computation["function"] in deleted:
+                        self.edit_channel(wid.channel_item_to_config(item), item, wid)
 
-                    iterator += 1
+    def effective_global_variables(self):
+        """Globale Variablen der Berechnung: Parameter plus eigener Block.
+
+        Die Parameter stehen vorne, damit der eigene Block sie
+        benutzen kann.
+        """
+        teile = [
+            teil for teil in (parameters_to_code(getattr(self, "parameters", None)), self.global_variables) if teil
+        ]
+
+        return "\n".join(teile)
+
+    def recompute_parameter_channels(self, names=None):
+        """Virtuelle Signale neu rechnen, die von Parametern abhaengen.
+
+        Ohne names alle. Mit names nur die, deren Funktionstext einen
+        dieser Parameternamen enthaelt - bei grossen Konfigurationen
+        waere alles neu zu rechnen unnoetig teuer.
+        """
+        namen = set(names or ())
+        anzahl = 0
+
+        for mdi in self.all_sub_windows():
+            wid = mdi.widget()
+            if not isinstance(wid, Plot):
+                continue
+
+            for item in self.computed_items(wid):
+                if namen:
+                    funktion = item.signal.computation.get("function", "")
+                    if not used_in(self.functions.get(funktion, ""), namen):
+                        continue
+
+                self.edit_channel(wid.channel_item_to_config(item), item, wid)
+                anzahl += 1
+
+        return anzahl
+
+    def computed_items(self, widget):
+        """Alle Zeilen virtueller Signale eines Plotfensters.
+
+        Ueber jede Kanalliste des Fensters - jeder Strip hat seine
+        eigene. Frueher zaehlte nur die des aktiven Strips, virtuelle
+        Signale in den anderen Strips wurden beim Neurechnen also
+        uebersehen. Die Zeilen kommen als Liste, nicht als laufender
+        Iterator: beim Neurechnen wird die Liste selbst angefasst.
+        """
+        if hasattr(widget, "channel_lists"):
+            listen = widget.channel_lists()
+        else:
+            listen = [widget.channel_selection]
+
+        items = []
+
+        for tree in listen:
+            iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+            while item := iterator.value():
+                iterator += 1
+
+                if item.type() == item.Channel and item.signal.flags & item.signal.Flags.computed:
+                    items.append(item)
+
+        return items
 
     def edit_channel(self, channel, item, widget):
         required_channels = set(get_required_from_computed(channel))
@@ -3504,7 +3568,7 @@ class WithMDIArea:
             required_channels,
             all_timebase,
             self.functions,
-            self.global_variables,
+            self.effective_global_variables(),
         )
         signal.name = channel["name"]
         signal.unit = channel["unit"]
@@ -4068,7 +4132,7 @@ class WithMDIArea:
                         required_channels,
                         all_timebase,
                         self.functions,
-                        self.global_variables,
+                        self.effective_global_variables(),
                     )
                     signal.color = channel["color"]
                     signal.flags |= signal.Flags.computed
@@ -4254,7 +4318,10 @@ class WithMDIArea:
             plot.splitter.setSizes(window_info["configuration"]["splitter"])
 
         if "y_axis_width" in window_info["configuration"]:
-            plot.plot.y_axis.setWidth(window_info["configuration"]["y_axis_width"])
+            # Fuer alle Strips, nicht nur fuer den aktiven: sonst
+            # beginnen die Zeichenflaechen untereinander an
+            # verschiedenen Stellen.
+            plot.apply_axis_width(window_info["configuration"]["y_axis_width"])
 
         if "grid" in window_info["configuration"]:
             x_grid, y_grid = window_info["configuration"]["grid"]
@@ -4914,40 +4981,35 @@ class WithMDIArea:
         for mdi in self.all_sub_windows():
             wid = mdi.widget()
             if isinstance(wid, Plot):
-                iterator = QtWidgets.QTreeWidgetItemIterator(wid.channel_selection)
-                while item := iterator.value():
-                    if item.type() == item.Channel:
-                        if item.signal.flags & item.signal.Flags.computed:
-                            function = item.signal.computation["function"]
+                for item in self.computed_items(wid):
+                    function = item.signal.computation["function"]
 
-                            if new_global_variables or function in changed:
-                                try:
-                                    item.signal.computation["function"] = translation[
-                                        item.signal.computation["function"]
-                                    ]
+                    if new_global_variables or function in changed:
+                        try:
+                            item.signal.computation["function"] = translation[
+                                item.signal.computation["function"]
+                            ]
 
-                                    func_name = item.signal.computation["function"]
-                                    definition = self.functions[func_name]
-                                    _globals = generate_python_function_globals()
-                                    exec(definition.replace("\t", "    "), _globals)
-                                    func = _globals[func_name]
+                            func_name = item.signal.computation["function"]
+                            definition = self.functions[func_name]
+                            _globals = generate_python_function_globals()
+                            exec(definition.replace("\t", "    "), _globals)
+                            func = _globals[func_name]
 
-                                    parameters = list(inspect.signature(func).parameters)[:-1]
-                                    args = {name: [] for name in parameters}
-                                    for arg_name, alternatives in zip(
-                                        parameters,
-                                        item.signal.computation["args"].values(),
-                                        strict=False,
-                                    ):
-                                        args[arg_name] = alternatives
+                            parameters = list(inspect.signature(func).parameters)[:-1]
+                            args = {name: [] for name in parameters}
+                            for arg_name, alternatives in zip(
+                                parameters,
+                                item.signal.computation["args"].values(),
+                                strict=False,
+                            ):
+                                args[arg_name] = alternatives
 
-                                    item.signal.computation["args"] = args
-                                except:
-                                    print(format_exc())
+                            item.signal.computation["args"] = args
+                        except:
+                            print(format_exc())
 
-                            self.edit_channel(wid.channel_item_to_config(item), item, wid)
-
-                    iterator += 1
+                    self.edit_channel(wid.channel_item_to_config(item), item, wid)
 
         return bool(new or changed or deleted)
 

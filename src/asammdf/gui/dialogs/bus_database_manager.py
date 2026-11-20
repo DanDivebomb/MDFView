@@ -1,5 +1,6 @@
 from PySide6 import QtCore, QtWidgets
 
+from ..mdfview_geometry import remember_geometry
 from ..widgets.bus_database_manager import BusDatabaseManager
 
 
@@ -56,7 +57,8 @@ class BusDatabaseManagerDialog(QtWidgets.QDialog):
 
         self.setWindowTitle("Bus Database Manager")
 
-        self.showMaximized()
+        # Nicht mehr bildschirmfuellend: die Groesse vom letzten Mal.
+        remember_geometry(self, "bus_database_manager", (900, 600))
 
     def apply(self, *args):
         self.pressed_button = "apply"

@@ -31,6 +31,10 @@ from ..utils import (
 from .tree_item import MinimalTreeItem
 
 NOT_FOUND = 0xFFFFFFFF
+
+# Markierung in der Liste eines nicht aktiven Strips: 100 waere
+# unveraendert, 200 die halbe Helligkeit.
+ABGEDUNKELT = 185
 MINIMUM_COLUMN_WIDTH = 30
 
 # Nachkommastellen je Kanalname. Gilt fuer alle Plots und Strips der
@@ -471,18 +475,33 @@ class Delegate(QtWidgets.QItemDelegate):
 
         item = self.parent().itemFromIndex(index)
 
+        # Die Liste eines Strips, in dem gerade nicht gearbeitet wird,
+        # zeigt ihre Markierung gedaempft - so ist immer zu sehen,
+        # welcher Strip der aktive ist.
+        aktiv = getattr(self.parent(), "strip_active", True)
+
         if item.type() == item.Channel:
             brush = model.data(index, QtCore.Qt.ItemDataRole.ForegroundRole)
 
             if brush is not None:
                 color = brush.color()
 
-                complementary = fn.mkColor("#000000")
-                if complementary == color:
-                    complementary = fn.mkColor("#FFFFFF")
+                if aktiv:
+                    complementary = fn.mkColor("#000000")
+                    if complementary == color:
+                        complementary = fn.mkColor("#FFFFFF")
+                else:
+                    color = color.darker(ABGEDUNKELT)
+                    complementary = fn.mkColor("#FFFFFF" if color.value() < 128 else "#000000")
 
                 option.palette.setColor(QtGui.QPalette.ColorRole.Highlight, color)
                 option.palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, complementary)
+
+        elif not aktiv:
+            farbe = option.palette.color(
+                QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Highlight
+            ).darker(ABGEDUNKELT)
+            option.palette.setColor(QtGui.QPalette.ColorRole.Highlight, farbe)
 
         super().paint(painter, option, index)
 
@@ -599,6 +618,15 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         super().__init__(*args, **kwargs)
         ChannelsTreeWidget.instances.add(self)
         self.plot = plot
+
+        # Gehoert diese Liste zum aktiven Strip? Entscheidet nur
+        # darueber, wie kraeftig die Markierung gezeichnet wird.
+        self.strip_active = True
+
+        # Zuletzt markierte Kanaele. Klickt man in die Zeichenflaeche
+        # eines Strips, dessen Liste keine Markierung hat, kommen sie
+        # wieder - sonst laufen die Befehle dort ins Leere.
+        self.last_selected_uuids = []
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
 
@@ -789,11 +817,12 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     def dragMoveEvent(self, e):
         self.autoscroll_mouse_pos = e.answerRect().y()
 
-        # Auswahlfeld fuehren - Abwuerfe auf eine Kanalliste kommen hier
-        # an und nicht im Plotfenster.
+        # Ueber der Kanalliste kein Auswahlfeld: hier zieht man Signale
+        # in eine andere Reihenfolge, und ein Feld mit 'New strip
+        # above/below' stoert dabei. Es gehoert zur Zeichenflaeche.
         window = self.plot
-        if hasattr(window, "strip_hint_update"):
-            window.strip_hint_update(getattr(self, "owner_plot", None), e.position().toPoint())
+        if hasattr(window, "strip_hint_hide"):
+            window.strip_hint_hide()
 
         e.accept()
 
@@ -2291,7 +2320,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
             self.setColumnHidden(col, not is_visible)
 
-    def set_header_sizes(self, sizes):
+    def set_header_sizes(self, sizes, clamp=True):
         # Aus den Qt-Einstellungen kommen die Breiten als Text zurueck.
         self._restoring_header_sizes = True
         try:
@@ -2305,7 +2334,11 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                 except (TypeError, ValueError):
                     continue
 
-                if name in ("NameColumn", "ValueColumn"):
+                # Untergrenze nur fuer gespeicherte Werte. Zieht der
+                # Benutzer eine Spalte schmaler, folgen die anderen
+                # Listen genau - sonst stehen sie ploetzlich anders
+                # als die, an der er gezogen hat.
+                if clamp and name in ("NameColumn", "ValueColumn"):
                     size = max(size, 50)
 
                 self.setColumnWidth(col, size)

@@ -18,6 +18,8 @@ from .. import utils
 from ..dialogs.bus_database_manager import BusDatabaseManagerDialog
 from ..dialogs.dependencies_dlg import DependenciesDlg
 from ..dialogs.functions_manager import FunctionsManagerDialog
+from ..dialogs.parameter_manager import ParameterManagerDialog
+from ..mdfview_parameters import parameters_to_code
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.multi_search import MultiSearch
 from ..dialogs.window_selection_dialog import WindowSelectionDialog
@@ -32,7 +34,7 @@ from ..mdfview_paths import remember_folder, start_folder
 # Eigener Name und eigene Zaehlung - damit niemand diesen Zweig mit
 # dem Original verwechselt. libversion bleibt die asammdf-Version
 # darunter und steht weiterhin im Info-Fenster.
-MDFVIEW_VERSION = "1.0.0"
+MDFVIEW_VERSION = "1.1.0"
 
 
 def mdfview_icon():
@@ -196,6 +198,11 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action = QtGui.QAction("{: <20}\tF6".format("Functions manager"), menu)
         action.triggered.connect(self.functions_manager)
         action.setShortcut("F6")
+        actions.addAction(action)
+
+        action = QtGui.QAction("{: <20}\tF8".format("Parameter manager"), menu)
+        action.triggered.connect(self.parameter_manager)
+        action.setShortcut("F8")
         actions.addAction(action)
 
         action = QtGui.QAction("{: <20}".format("Bus database manager"), menu)
@@ -1928,7 +1935,14 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                     channels[name] = comment
 
                 dlg = FunctionsManagerDialog(
-                    file.functions, channels, parent=self, global_variables=file.global_variables
+                    file.functions,
+                    channels,
+                    parent=self,
+                    global_variables=file.global_variables,
+                    # Die Parameter gehoeren zur Pruefung dazu, aber
+                    # nicht in das Feld: sie werden aus der
+                    # Konfiguration erzeugt, nicht hier bearbeitet.
+                    extra_globals=parameters_to_code(file.parameters),
                 )
                 dlg.setModal(True)
                 dlg.exec()
@@ -1945,6 +1959,28 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                     file.update_functions(
                         original_definitions, modified_definitions, new_global_variables=new_global_variables
                     )
+
+    def parameter_manager(self):
+        """Skalare, Kennlinien und Kennfelder der Konfiguration."""
+        if self.stackedWidget.currentIndex() != 0:
+            return
+
+        file = self.files.currentWidget()
+        if not file:
+            return
+
+        dlg = ParameterManagerDialog(file.parameters, parent=self)
+        dlg.setModal(True)
+        dlg.exec()
+
+        if dlg.pressed_button != "apply":
+            return
+
+        file.parameters = dlg.parameters
+
+        # Virtuelle Signale, die diese Parameter benutzen, neu rechnen.
+        if dlg.changed_names:
+            file.recompute_parameter_channels(dlg.changed_names)
 
     def bus_database_manager(self):
         dlg = BusDatabaseManagerDialog(parent=self)

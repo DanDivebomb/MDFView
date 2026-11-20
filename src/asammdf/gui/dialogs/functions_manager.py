@@ -4,6 +4,7 @@ import os
 from PySide6 import QtCore, QtWidgets
 
 from ..dialogs.messagebox import MessageBox
+from ..mdfview_geometry import remember_geometry
 from ..widgets.functions_manager import FunctionsManager
 
 
@@ -15,6 +16,7 @@ class FunctionsManagerDialog(QtWidgets.QDialog):
         selected_definition="",
         prefix="",
         global_variables="",
+        extra_globals="",
         *args,
         **kwargs,
     ):
@@ -44,7 +46,13 @@ class FunctionsManagerDialog(QtWidgets.QDialog):
         self.setSizeGripEnabled(True)
         self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.verticalLayout = QtWidgets.QVBoxLayout(self)
-        self.widget = FunctionsManager(deepcopy(definitions), channels, selected_definition, global_variables)
+        self.widget = FunctionsManager(
+            deepcopy(definitions),
+            channels,
+            selected_definition,
+            global_variables,
+            extra_globals=extra_globals,
+        )
 
         self.verticalLayout.addWidget(self.widget)
 
@@ -69,6 +77,10 @@ class FunctionsManagerDialog(QtWidgets.QDialog):
             self.setWindowTitle(f"{prefix} - Functions Manager")
         else:
             self.setWindowTitle("Functions Manager")
+
+        # Groesse vom letzten Mal - 404 x 294 ist fuer einen
+        # Code-Editor zu klein.
+        remember_geometry(self, "functions_manager", (1150, 800))
 
     def apply(self, *args):
         self.pressed_button = "apply"

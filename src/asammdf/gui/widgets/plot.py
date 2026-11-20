@@ -2586,6 +2586,14 @@ class Plot(QtWidgets.QWidget):
             if tree is not None:
                 tree.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
+                # Die Listen der anderen Strips zeigen ihre Markierung
+                # gedaempft, damit immer zu sehen ist, wo man zuletzt
+                # gearbeitet hat.
+                aktiv = strip is self.plot
+                if getattr(tree, "strip_active", None) != aktiv:
+                    tree.strip_active = aktiv
+                    tree.viewport().update()
+
     def move_x_range(self, start, stop):
         """Alle Strips auf diesen Zeitbereich schieben.
 
@@ -2858,6 +2866,56 @@ class Plot(QtWidgets.QWidget):
 
         return None
 
+    def _remember_selection(self, tree):
+        """Markierte Kanaele einer Liste festhalten.
+
+        Eine leere Auswahl loescht die Erinnerung nicht - genau dann
+        soll sie ja wieder gelten.
+        """
+        uuids = [item.uuid for item in tree.selectedItems() if item.type() == ChannelsTreeItem.Channel]
+
+        if uuids:
+            tree.last_selected_uuids = uuids
+
+    def ensure_strip_selection(self, strip):
+        """Dem Strip eine Markierung geben, falls keine da ist.
+
+        Farbe, Y-Bereich, Loeschen und viele andere Befehle arbeiten auf
+        den markierten Zeilen der Kanalliste. Klickt man nur in die
+        Zeichenflaeche, ist dort nichts markiert und der Befehl tut
+        scheinbar nichts. Dann gelten die zuletzt markierten Zeilen,
+        und solange es keine gab, die erste der Liste.
+        """
+        tree = getattr(strip, "channel_list", None)
+        if tree is None or tree.selectedItems():
+            return
+
+        merke = list(getattr(tree, "last_selected_uuids", None) or [])
+        treffer = []
+        erste = None
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+        while item := iterator.value():
+            iterator += 1
+
+            if item.isHidden() or item.type() != ChannelsTreeItem.Channel:
+                continue
+
+            if erste is None:
+                erste = item
+
+            if getattr(item, "uuid", None) in merke:
+                treffer.append(item)
+
+        if not treffer:
+            if erste is None:
+                return
+            treffer = [erste]
+
+        tree.setCurrentItem(treffer[0])
+        for item in treffer:
+            item.setSelected(True)
+
     def eventFilter(self, obj, event):
         """Klicks und Ziehvorgaenge der Strips mitlesen.
 
@@ -2873,8 +2931,21 @@ class Plot(QtWidgets.QWidget):
             QtCore.QEvent.Type.Drop,
         ):
             strip = self._strip_for_object(obj)
-            if strip is not None and strip is not self.plot:
-                self.set_active_strip(strip)
+            if strip is not None:
+                if strip is not self.plot:
+                    self.set_active_strip(strip)
+
+                # In der Kanalliste entscheidet der Klick selbst, was
+                # markiert ist. In der Zeichenflaeche markiert Qt nichts
+                # - dort gilt die letzte Markierung des Strips.
+                tree = getattr(strip, "channel_list", None)
+                if (
+                    kind == QtCore.QEvent.Type.MouseButtonPress
+                    and tree is not None
+                    and obj is not tree.viewport()
+                    and obj is not getattr(strip, "list_panel", None)
+                ):
+                    self.ensure_strip_selection(strip)
 
         return super().eventFilter(obj, event)
 
@@ -3262,6 +3333,20 @@ class Plot(QtWidgets.QWidget):
                 tree.set_header_sizes(vorhandene.header_sizes())
                 tree.user_header_sizes = True
                 break
+
+        # Zieht man die Breite der y-Skala, gilt sie im ganzen Fenster.
+        achse = getattr(plot, "y_axis", None)
+        if achse is not None:
+            achse.width_changed.connect(self.spread_axis_width)
+
+            for vorhandener in self.strips:
+                if vorhandener is plot:
+                    continue
+
+                vorbild = getattr(vorhandener, "y_axis", None)
+                if vorbild is not None:
+                    achse.setWidth(vorbild.tick_width())
+                    break
 
         # Hoehe der Zeichenflaeche und Rollstand der Liste bestimmen, wo
         # die Signalzeilen liegen - beides kann sich jederzeit aendern.
@@ -4091,6 +4176,7 @@ class Plot(QtWidgets.QWidget):
         tree.group_activation_changed.connect(self.cursor_moved)
         tree.currentItemChanged.connect(self.channel_selection_row_changed)
         tree.itemSelectionChanged.connect(self.channel_selection_changed)
+        tree.itemSelectionChanged.connect(partial(self._remember_selection, tree))
         tree.add_channels_request.connect(self.add_channels_request)
         tree.set_time_offset.connect(plot.set_time_offset)
         tree.show_overlapping_alias.connect(self._show_overlapping_alias)
@@ -4266,8 +4352,52 @@ class Plot(QtWidgets.QWidget):
             if tree is quelle:
                 continue
 
-            tree.set_header_sizes(sizes)
+            tree.set_header_sizes(sizes, clamp=False)
             tree.user_header_sizes = True
+
+    def spread_axis_width(self, width):
+        """Breite der y-Skala auf alle Strips uebertragen.
+
+        Die Strips liegen untereinander. Unterschiedlich breite Skalen
+        versetzen ihre Zeichenflaechen gegeneinander - also gilt eine
+        Breite fuer das ganze Fenster, genau wie bei den Spalten der
+        Kanallisten.
+        """
+        try:
+            width = float(width)
+        except (TypeError, ValueError):
+            return
+
+        if width < 10:
+            return
+
+        for strip in self.strips:
+            achse = getattr(strip, "y_axis", None)
+            if achse is None or achse.tick_width() == width:
+                continue
+
+            achse.setWidth(width)
+            achse.picture = None
+            achse.update()
+
+    def apply_axis_width(self, width):
+        """Breite der y-Skala aus einer Konfiguration uebernehmen.
+
+        Gespeichert war bisher die ganze sichtbare Breite, also Skala
+        plus Beschriftung. Beim Laden kam die Beschriftung noch einmal
+        dazu: in alten Konfigurationen stehen deshalb 300, 400, 500
+        Punkte. So breit stellt die Skala niemand ein - bei solchen
+        Werten entscheidet wieder der Inhalt.
+        """
+        try:
+            width = float(width)
+        except (TypeError, ValueError):
+            return
+
+        if width < 10 or width > 200:
+            return
+
+        self.spread_axis_width(width)
 
     def set_list_width(self, width):
         """Breite der Kanalspalte setzen - und als gewuenscht merken.
@@ -4280,12 +4410,26 @@ class Plot(QtWidgets.QWidget):
         except (TypeError, ValueError):
             return
 
-        if width < 10:
-            return
+        # In dieser Breite ist keine Spalte lesbar. Alte Konfigurationen
+        # tragen hier teils 70 Punkte, weil die Breite damals von der
+        # einen Liste des Fensters kam. Dann zaehlen die gespeicherten
+        # Spaltenbreiten: genau so breit, dass sie hineinpassen.
+        if width < 100:
+            width = max(self.header_width(), 150)
 
         gesamt = sum(self.splitter.sizes())
         self.splitter.setSizes([width, max(gesamt - width, 50), 0])
         self._user_splitter = True
+
+    def header_width(self):
+        """Breite, die die sichtbaren Spalten einer Kanalliste brauchen."""
+        tree = self.channel_selection
+        if tree is None:
+            return 0
+
+        return sum(
+            tree.columnWidth(col) for col in range(tree.columnCount()) if not tree.isColumnHidden(col)
+        )
 
     def apply_header_sizes(self, sizes):
         """Spaltenbreiten aus einer Konfiguration auf alle Listen legen."""
@@ -4319,7 +4463,12 @@ class Plot(QtWidgets.QWidget):
         if getattr(self, "_user_splitter", False):
             return
 
-        width = sum(tree.columnWidth(col) for col in range(tree.columnCount()))
+        # Nur die sichtbaren Spalten: Qt merkt sich die Breite einer
+        # ausgeblendeten Spalte weiter, und die zaehlte hier mit - die
+        # Kanalspalte wurde dadurch deutlich breiter als ihr Inhalt.
+        width = sum(
+            tree.columnWidth(col) for col in range(tree.columnCount()) if not tree.isColumnHidden(col)
+        )
 
         if width > self.splitter.sizes()[0]:
             if size - width >= 300:
@@ -4386,7 +4535,7 @@ class Plot(QtWidgets.QWidget):
 
         if item.checkState(item.IndividualAxisColumn) == QtCore.Qt.CheckState.Checked:
             channel["individual_axis"] = True
-            channel["individual_axis_width"] = strip.get_axis(idx).width()
+            channel["individual_axis_width"] = strip.get_axis(idx).stored_width()
         else:
             channel["individual_axis"] = False
 
@@ -4528,6 +4677,19 @@ class Plot(QtWidgets.QWidget):
 
         elif item.type() != item.Info:
             if item.type() == item.Channel:
+                # Virtuelles Signal: der Doppelklick oeffnet seine
+                # Einstellungen. Der Menueeintrag dafuer liegt tief in
+                # einem Untermenue und ist kaum zu finden. Ein- und
+                # ausschalten geht weiter ueber das Kaestchen.
+                if (
+                    button == QtCore.Qt.MouseButton.LeftButton
+                    and item.signal.flags & item.signal.Flags.computed
+                ):
+                    strip = self._strip_of(item.uuid)
+                    if strip is not None:
+                        strip.edit_computation(item)
+                    return
+
                 if not item.isDisabled():
                     if item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked:
                         item.setCheckState(item.NameColumn, QtCore.Qt.CheckState.Unchecked)
@@ -4802,6 +4964,20 @@ class Plot(QtWidgets.QWidget):
 
         return None
 
+    def strip_area_at(self, global_position):
+        """Welche Zeichenflaeche liegt unter dieser Bildschirmposition?
+
+        Anders als strip_at zaehlt die Kanalliste daneben nicht mit: das
+        Auswahlfeld fuer einen neuen Strip gehoert an die Zeichenflaeche.
+        In der Liste zieht man Signale in eine andere Reihenfolge, da
+        waere es nur im Weg.
+        """
+        for strip in self.strips:
+            if strip.rect().contains(strip.mapFromGlobal(global_position)):
+                return strip
+
+        return None
+
     def strip_hint(self):
         hint = getattr(self, "_strip_hint", None)
 
@@ -4893,7 +5069,7 @@ class Plot(QtWidgets.QWidget):
         return choice - 1
 
     def dragMoveEvent(self, e):
-        self.strip_hint_update(self.strip_at(QtGui.QCursor.pos()), e.position().toPoint())
+        self.strip_hint_update(self.strip_area_at(QtGui.QCursor.pos()), e.position().toPoint())
         e.accept()
 
     def dragLeaveEvent(self, e):
@@ -5732,7 +5908,7 @@ class Plot(QtWidgets.QWidget):
                 0,
             ],
             "x_range": self.plot.viewbox.viewRange()[0],
-            "y_axis_width": self.plot.y_axis.width(),
+            "y_axis_width": self.plot.y_axis.stored_width(),
             "grid": [
                 self.plot.plotItem.ctrl.xGridCheck.isChecked(),
                 self.plot.plotItem.ctrl.yGridCheck.isChecked(),
@@ -6884,7 +7060,7 @@ class PlotGraphics(pg.PlotWidget):
             mdf=mdf,
             computation=signal.computation,
             functions=functions,
-            global_variables=self.plot_parent.owner.global_variables,
+            global_variables=self.plot_parent.owner.effective_global_variables(),
             parent=self,
         )
         dlg.setModal(True)
@@ -7001,7 +7177,7 @@ class PlotGraphics(pg.PlotWidget):
             mdf=mdf,
             computation=None,
             functions=functions,
-            global_variables=self.plot_parent.owner.global_variables,
+            global_variables=self.plot_parent.owner.effective_global_variables(),
             parent=self,
         )
         dlg.setModal(True)

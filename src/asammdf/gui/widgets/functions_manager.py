@@ -18,11 +18,27 @@ from .python_highlighter import PythonHighlighter
 
 
 class FunctionsManager(Ui_FunctionsManager, QtWidgets.QWidget):
-    def __init__(self, definitions, channels=None, selected_definition="", global_variables="", *args, **kwargs):
+    def __init__(
+        self,
+        definitions,
+        channels=None,
+        selected_definition="",
+        global_variables="",
+        extra_globals="",
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.setupUi(self)
 
         self.original_globals = global_variables
+
+        # Code, der bei der Pruefung mit dazu gehoert, aber nicht im
+        # Feld steht und auch nicht gespeichert wird: die Parameter
+        # der Konfiguration mit ihren Zugriffen P, KL und KF. Ohne
+        # sie scheitert jede Funktion, die KF benutzt, an "name
+        # not defined" - obwohl sie beim Rechnen laeuft.
+        self.extra_globals = extra_globals or ""
 
         self.channels = channels or {}
 
@@ -156,7 +172,10 @@ def MyAverage(main_clock=0, p_FL=0, p_FR=0, p_RL=0, p_RR=0, vehicle_speed=0, t=0
         self.refresh_functions_list(selected_definition=name)
 
     def check_globals_syntax(self, silent=False):
-        trace = generate_python_variables(self.globals_definition.toPlainText())
+        _globals = generate_python_function_globals()
+        generate_python_variables(self.extra_globals, in_globals=_globals)
+
+        trace = generate_python_variables(self.globals_definition.toPlainText(), in_globals=_globals)
 
         if trace:
             ErrorDialog(
@@ -184,6 +203,8 @@ def MyAverage(main_clock=0, p_FL=0, p_FR=0, p_RL=0, p_RR=0, vehicle_speed=0, t=0
 
         _globals = generate_python_function_globals()
 
+        # erst die Parameter, dann der eigene Block - so wie beim Rechnen
+        generate_python_variables(self.extra_globals, in_globals=_globals)
         generate_python_variables(globals_definition, in_globals=_globals)
 
         for info in self.definitions.values():

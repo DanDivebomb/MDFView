@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...signal import Signal
 from ..function_library import FunctionLibrary
+from ..mdfview_geometry import remember_geometry
 from ..ui.define_channel_dialog import Ui_ComputedChannel
 from ..utils import (
     computation_to_python_function,
@@ -133,7 +134,8 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         self.name_label.setMinimumSize(QtCore.QSize(self.triggering_on_all.width() + 4, 0))
         self.func_name_label.setMinimumSize(QtCore.QSize(self.triggering_on_all.width() - 1, 0))
 
-        self.showMaximized()
+        # Nicht mehr bildschirmfuellend: die Groesse vom letzten Mal.
+        remember_geometry(self, "define_channel", (1250, 850))
 
     def apply(self):
         if not self.functions.currentIndex() >= 0:
