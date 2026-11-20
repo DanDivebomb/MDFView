@@ -32,7 +32,7 @@ from ..mdfview_paths import remember_folder, start_folder
 # Eigener Name und eigene Zaehlung - damit niemand diesen Zweig mit
 # dem Original verwechselt. libversion bleibt die asammdf-Version
 # darunter und steht weiterhin im Info-Fenster.
-MDFVIEW_VERSION = "1.1.0"
+MDFVIEW_VERSION = "1.0.0"
 
 
 def mdfview_icon():
@@ -1842,25 +1842,54 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         measurement = self.measurement_file_of_configuration(file_name)
 
-        if measurement is None:
-            MessageBox.information(
-                self,
-                "No measurement file in the configuration",
-                "This configuration does not name a measurement file.\n\n"
-                "It was probably saved by an older version. Open the measurement "
-                "file first, then load the configuration.",
-            )
-            return
+        # Keine oder keine erreichbare Messdatei: nicht einfach
+        # abbrechen, sondern eine andere anbieten. Sonst kommt man
+        # an so eine Konfiguration gar nicht mehr heran, wenn etwa
+        # das Netzlaufwerk fehlt oder die Messung umgezogen ist.
+        if measurement is None or not measurement.exists():
+            if measurement is None:
+                titel = "No measurement file in the configuration"
+                text = (
+                    "This configuration does not name a measurement file.\n\n"
+                    "Select the measurement it belongs to?"
+                )
+            else:
+                titel = "Measurement file not found"
+                text = (
+                    f"The configuration refers to\n\n{measurement}\n\n"
+                    "but that file cannot be reached.\n\n"
+                    "Select another measurement to use this configuration with?"
+                )
 
-        if not measurement.exists():
-            MessageBox.warning(
+            if MessageBox.question(self, titel, text) != MessageBox.Yes:
+                return
+
+            # Dort anfangen, wo die Messung zuletzt lag - sonst beim
+            # zuletzt geoeffneten Ordner.
+            start = ""
+            if measurement is not None:
+                ordner = measurement.parent
+                if ordner.exists():
+                    start = str(ordner)
+
+            if not start:
+                start = self._settings.value("last_opened_path", "", str)
+
+            ersatz, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
-                "Measurement file not found",
-                f"The configuration refers to\n\n{measurement}\n\n"
-                "but that file does not exist any more. Open the measurement "
-                "file yourself, then load the configuration.",
+                "Select measurement file for this configuration",
+                start,
+                "All file types (*.csv *.dat *.mdf *.mf4 *.mf4z *.dl3 *.erg);;"
+                "MDF v4 (*.mf4 *.mf4z);;MDF v3 (*.dat *.mdf);;CSV (*.csv);;"
+                "DL3/ERG files (*.dl3 *.erg)",
+                "All file types (*.csv *.dat *.mdf *.mf4 *.mf4z *.dl3 *.erg)",
             )
-            return
+
+            if not ersatz:
+                return
+
+            measurement = Path(ersatz)
+            self._settings.setValue("last_opened_path", ersatz)
 
         self._open_file(measurement)
 
