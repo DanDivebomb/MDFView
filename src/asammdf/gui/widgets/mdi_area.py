@@ -5289,14 +5289,29 @@ class WithMDIArea:
         for i, mdi in enumerate(self.all_sub_windows()):
             widget = mdi.widget()
             if isinstance(widget, Plot):
-                widget.plot.cursor1.show_circle = cursor_circle
-                widget.plot.cursor1.show_horizontal_line = cursor_horizontal_line
-                widget.plot.cursor1.line_width = cursor_line_width
-                widget.plot.cursor1.color = cursor_color
-                if widget.plot.region is not None:
-                    for cursor in widget.plot.region.lines:
+                # Jeder Strip hat seinen eigenen Cursor. Frueher wurde
+                # nur der des aktiven Strips umgestellt - in allen
+                # anderen blieb die waagerechte Linie stehen.
+                stil = getattr(widget, "_strip_cursor_style", None)
+                if isinstance(stil, dict):
+                    # damit auch spaeter angelegte Strips es erben
+                    stil["show_circle"] = cursor_circle
+                    stil["show_horizontal_line"] = cursor_horizontal_line
+                    stil["line_width"] = cursor_line_width
+                    stil["color"] = cursor_color
+
+                for strip in getattr(widget, "strips", None) or [widget.plot]:
+                    cursors = [strip.cursor1]
+                    if strip.region is not None:
+                        cursors.extend(strip.region.lines)
+
+                    for cursor in cursors:
+                        if cursor is None:
+                            continue
+
                         cursor.show_circle = cursor_circle
                         cursor.show_horizontal_line = cursor_horizontal_line
                         cursor.line_width = cursor_line_width
                         cursor.color = cursor_color
-                widget.plot.update()
+
+                    strip.update()

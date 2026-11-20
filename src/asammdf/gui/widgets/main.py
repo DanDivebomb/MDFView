@@ -32,7 +32,7 @@ from ..mdfview_paths import remember_folder, start_folder
 # Eigener Name und eigene Zaehlung - damit niemand diesen Zweig mit
 # dem Original verwechselt. libversion bleibt die asammdf-Version
 # darunter und steht weiterhin im Info-Fenster.
-MDFVIEW_VERSION = "1.0.0"
+MDFVIEW_VERSION = "1.1.0"
 
 
 def mdfview_icon():
