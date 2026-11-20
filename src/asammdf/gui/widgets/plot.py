@@ -1951,15 +1951,6 @@ class Plot(QtWidgets.QWidget):
         btn.setToolTip("Hide axis")
         hidden_box.addWidget(self.hide_axes_btn)
 
-        self.selected_channel_value_btn = btn = QtWidgets.QPushButton("")
-        btn.setObjectName("selected_channel_value_btn")
-        self.selected_channel_value_btn.clicked.connect(self.hide_selected_channel_value)
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/number_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        btn.setIcon(icon)
-        btn.setToolTip("Hide axis")
-        hidden_box.addWidget(self.selected_channel_value_btn)
-
         self.focused_mode_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("focused_mode_btn")
         self.focused_mode_btn.clicked.connect(self.toggle_focused_mode)
@@ -1988,18 +1979,6 @@ class Plot(QtWidgets.QWidget):
         hidden_box.addWidget(btn)
 
         hbox.addStretch()
-
-        self.selected_channel_value = QtWidgets.QLabel("")
-        self.selected_channel_value.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
-        )
-        self.selected_channel_value.setAutoFillBackground(True)
-        font = self.selected_channel_value.font()
-        font.setBold(True)
-        font.setPointSize(24)
-        self.selected_channel_value.setFont(font)
-
-        vbox.addWidget(self.selected_channel_value)
 
         # Die Listen stehen untereinander in der linken Spalte, je eine
         # pro Strip. Die Hoehen werden mit dem Strip-Splitter rechts
@@ -2164,11 +2143,11 @@ class Plot(QtWidgets.QWidget):
 
         self.disabled_keyboard_events = set()
 
+        # Wurde die Breite der linken Spalte von Hand oder aus einer
+        # Konfiguration gesetzt? Dann nicht mehr automatisch anpassen.
+        self._user_splitter = False
         self.splitter.splitterMoved.connect(self.set_splitter)
 
-        self.hide_selected_channel_value(
-            hide=self._settings.value("plot/hide_selected_channel_value", False, type=bool)
-        )
         self.toggle_focused_mode(focused=self._settings.value("plot/focused_mode", False, type=bool))
         self.toggle_region_values_display_mode(mode=self._settings.value("plot/region_values_display_mode", "value"))
 
@@ -3276,6 +3255,14 @@ class Plot(QtWidgets.QWidget):
         # Zeilen im Digital- und Enumfenster stehen neben ihrem Namen.
         tree.header().setFixedHeight(STRIP_BAR_HEIGHT)
 
+        # Die neue Liste bekommt gleich die Spaltenbreiten des Fensters,
+        # damit nicht ein Strip aus der Reihe faellt.
+        for vorhandene in self.channel_lists():
+            if vorhandene is not tree and getattr(vorhandene, "user_header_sizes", False):
+                tree.set_header_sizes(vorhandene.header_sizes())
+                tree.user_header_sizes = True
+                break
+
         # Hoehe der Zeichenflaeche und Rollstand der Liste bestimmen, wo
         # die Signalzeilen liegen - beides kann sich jederzeit aendern.
         plot.viewbox.sigResized.connect(partial(self.schedule_strip_layout, plot))
@@ -3426,7 +3413,6 @@ class Plot(QtWidgets.QWidget):
         toggles = {}
         for name, text in (
             ("hide_axes", "Hide axes"),
-            ("value_panel", "Hide selected channel value panel"),
             ("locked", "Lock all Y axes of this strip"),
         ):
             action = menu.addAction(text)
@@ -3457,7 +3443,6 @@ class Plot(QtWidgets.QWidget):
         state = {
             "locked": bool(self.locked),
             "hide_axes": self.hide_axes_btn.isFlat(),
-            "value_panel": self.selected_channel_value_btn.isFlat(),
             "focused": bool(self.focused_mode),
             "delta": self.region_values_display_mode == "delta",
             "bookmarks": bool(self.show_bookmarks),
@@ -4056,9 +4041,6 @@ class Plot(QtWidgets.QWidget):
         elif name == "hide_axes":
             self.hide_axes(hide=checked)
             self._settings.setValue("plot/hide_axes", checked)
-        elif name == "value_panel":
-            self.hide_selected_channel_value(hide=checked)
-            self._settings.setValue("plot/hide_selected_channel_value", checked)
         elif name == "focused":
             self.toggle_focused_mode(focused=checked)
             self._settings.setValue("plot/focused_mode", checked)
@@ -4271,6 +4253,49 @@ class Plot(QtWidgets.QWidget):
                 plot.cursor_move_finished.emit(plot.cursor1)
         finally:
             self._syncing_strip_cursor = False
+    def spread_header_sizes(self, quelle):
+        """Spaltenbreiten einer Kanalliste auf alle Strips uebertragen.
+
+        Die Listen stehen untereinander - unterschiedlich breite Spalten
+        saehen dort aus wie ein Fehler. Darum gilt eine Einstellung fuer
+        das ganze Fenster, und gespeichert werden muss auch nur eine.
+        """
+        sizes = quelle.header_sizes()
+
+        for tree in self.channel_lists():
+            if tree is quelle:
+                continue
+
+            tree.set_header_sizes(sizes)
+            tree.user_header_sizes = True
+
+    def set_list_width(self, width):
+        """Breite der Kanalspalte setzen - und als gewuenscht merken.
+
+        Kommt aus der Konfiguration. Ohne die Markierung wuerde der
+        naechste Kanal die Breite wieder ueberschreiben.
+        """
+        try:
+            width = int(width)
+        except (TypeError, ValueError):
+            return
+
+        if width < 10:
+            return
+
+        gesamt = sum(self.splitter.sizes())
+        self.splitter.setSizes([width, max(gesamt - width, 50), 0])
+        self._user_splitter = True
+
+    def apply_header_sizes(self, sizes):
+        """Spaltenbreiten aus einer Konfiguration auf alle Listen legen."""
+        if not sizes:
+            return
+
+        for tree in self.channel_lists():
+            tree.set_header_sizes(sizes)
+            tree.user_header_sizes = True
+
     def adjust_splitter(self, initial=False):
         """Breite der Kanallisten an ihren Inhalt anpassen.
 
@@ -4286,6 +4311,13 @@ class Plot(QtWidgets.QWidget):
         # stehen - sonst wuerde jeder neue Kanal sie wieder verwerfen.
         if (Plot.dynamic_columns_width or initial) and not getattr(tree, "user_header_sizes", False):
             tree.resize_columns_to_contents(tree.NameColumn, tree.UnitColumn)
+
+        # Hat der Benutzer die Trennlinie selbst gezogen oder kommt die
+        # Breite aus einer Konfiguration, bleibt sie stehen. Vorher hat
+        # jeder neue Kanal sie wieder auf die Summe der Spaltenbreiten
+        # gesetzt - deshalb liess sich die Breite nicht merken.
+        if getattr(self, "_user_splitter", False):
+            return
 
         width = sum(tree.columnWidth(col) for col in range(tree.columnCount()))
 
@@ -4444,36 +4476,6 @@ class Plot(QtWidgets.QWidget):
         if item is None:
             return
 
-        if item.uuid == self.info_uuid:
-            palette = self.selected_channel_value.palette()
-
-            brush = item.foreground(item.NameColumn)
-            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
-            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.WindowText, brush)
-            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.WindowText, brush)
-
-            brush = QtGui.QBrush(
-                item._current_background_color
-                if item._current_background_color is not None
-                else QtCore.Qt.BrushStyle.NoBrush
-            )
-            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Window, brush)
-            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Window, brush)
-
-            self.selected_channel_value.setPalette(palette)
-
-            value = item.text(item.ValueColumn)
-            unit = item.unit
-
-            metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
-            elided = metrics.elidedText(
-                f"{value} {unit}",
-                QtCore.Qt.TextElideMode.ElideRight,
-                self.selected_channel_value.width() - 10,
-            )
-
-            self.selected_channel_value.setText(elided)  # (f"{value} {unit}")
-
         if QtCore.Qt.ItemDataRole.CheckStateRole not in roles:
             return
 
@@ -4574,7 +4576,6 @@ class Plot(QtWidgets.QWidget):
         if not count:
             self.info_uuid = None
             self.info.set_stats(None)
-            self.selected_channel_value.setText("")
             self.close_request.emit()
 
     def channel_selection_row_changed(self, current, previous):
@@ -4696,31 +4697,6 @@ class Plot(QtWidgets.QWidget):
     def current_uuid_changed(self, uuid):
         self.info_uuid = uuid
 
-        if uuid:
-            palette = self.selected_channel_value.palette()
-            _strip, sig, _idx = self.strip_signal_by_uuid(uuid)
-            brush = QtGui.QBrush(sig.color)
-            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
-
-            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.WindowText, brush)
-            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.WindowText, brush)
-            self.selected_channel_value.setPalette(palette)
-
-            item = self.item_by_uuid(uuid)
-            if item is not None:
-                value = item.text(item.ValueColumn)
-                unit = item.unit
-                metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
-                elided = metrics.elidedText(
-                    f"{value} {unit}",
-                    QtCore.Qt.TextElideMode.ElideRight,
-                    self.selected_channel_value.width() - 10,
-                )
-
-                self.selected_channel_value.setText(elided)
-        else:
-            self.selected_channel_value.setText("")
-
     def cursor_moved(self, cursor=None):
         if self.plot.cursor1 is None:
             return
@@ -4745,18 +4721,6 @@ class Plot(QtWidgets.QWidget):
                     item.set_fmt(fmt)
 
                     item.set_value(raw_value, value, update=True)
-
-                    if item.uuid == self.info_uuid:
-                        value = item.text(item.ValueColumn)
-                        unit = item.unit
-                        metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
-                        elided = metrics.elidedText(
-                            f"{value} {unit}",
-                            QtCore.Qt.TextElideMode.ElideRight,
-                            self.selected_channel_value.width() - 10,
-                        )
-
-                        self.selected_channel_value.setText(elided)  # (f"{value} {unit}")
 
         if self.info.isVisible():
             stats = self._strip_of(self.info_uuid).get_stats(self.info_uuid)
@@ -5012,29 +4976,6 @@ class Plot(QtWidgets.QWidget):
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         self.hide_axes_btn.setIcon(icon)
-        self._sync_strip_buttons()
-
-    def hide_selected_channel_value(self, event=None, hide=None):
-        if hide is None:
-            hide = not self.selected_channel_value_btn.isFlat()
-            self._settings.setValue("plot/hide_selected_channel_value", hide)
-
-        if hide:
-            self.selected_channel_value.hide()
-            self.selected_channel_value_btn.setFlat(True)
-            self.selected_channel_value_btn.setToolTip("Show selected channel value panel")
-        else:
-            self.selected_channel_value.show()
-            self.selected_channel_value_btn.setFlat(False)
-            self.selected_channel_value_btn.setToolTip("Hide selected channel value panel")
-
-        if hide:
-            png = ":/number.png"
-        else:
-            png = ":/number_on.png"
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
-        self.selected_channel_value_btn.setIcon(icon)
         self._sync_strip_buttons()
 
     def increase_font(self):
@@ -5661,6 +5602,9 @@ class Plot(QtWidgets.QWidget):
         self.plot.set_locked(locked)
 
     def set_splitter(self, pos, index):
+        # Ab jetzt gilt die Breite als gewuenscht und wird nicht mehr
+        # automatisch nachgerechnet.
+        self._user_splitter = True
         self.splitter_moved.emit(self, pos)
 
     def set_timestamp(self, stamp):
@@ -5801,14 +5745,9 @@ class Plot(QtWidgets.QWidget):
                 self.splitter.sizes()[0],
                 [self.channel_selection.columnWidth(i) for i in range(self.channel_selection.columnCount())],
             ],
+            # Eine Spaltenaufteilung fuer das ganze Fenster: alle Listen
+            # eines Plots halten dieselben Breiten.
             "channels_header_sizes": [self.splitter.sizes()[0], self.channel_selection.header_sizes()],
-            # Spaltenbreiten je Strip - die Zeile darueber kennt nur die
-            # Liste des aktiven Strips und bleibt fuer aeltere Versionen.
-            "strip_header_sizes": [
-                strip.channel_list.header_sizes()
-                for strip in self.strips
-                if getattr(strip, "channel_list", None) is not None
-            ],
             "channels_header_columns_visible": [
                 not self.channel_selection.isColumnHidden(i)
                 for i in range(self.channel_selection.columnCount())
@@ -5816,7 +5755,6 @@ class Plot(QtWidgets.QWidget):
             ],
             "channels_header_columns_visiblity": self.channel_selection.header_columns_visibility(),
             "hide_axes": self.hide_axes_btn.isFlat(),
-            "hide_selected_channel_value_panel": self.selected_channel_value_btn.isFlat(),
             "focused_mode": not self.focused_mode_btn.isFlat(),
             "delta_mode": "value" if self.delta_btn.isFlat() else "delta",
             "hide_bookmarks": self.bookmark_btn.isFlat(),

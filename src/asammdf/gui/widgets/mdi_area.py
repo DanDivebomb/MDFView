@@ -4322,29 +4322,23 @@ class WithMDIArea:
         # keep compatibility with older asammdf versions
         if "channels_header_sizes" in window_info["configuration"]:
             width, sizes = window_info["configuration"]["channels_header_sizes"]
-            current_width = sum(plot.splitter.sizes())
-            plot.splitter.setSizes([width, max(current_width - width, 50)])
-            # Neue Konfigurationen haben die Breiten je Strip. Fehlen
-            # sie, gilt die eine Liste fuer alle - aber nur dort, wo der
-            # Benutzer nichts eigenes eingestellt hat, sonst holt eine
-            # alte .dspf die alten Breiten zurueck.
-            per_strip = window_info["configuration"].get("strip_header_sizes", [])
 
+            # Aeltere Konfigurationen haben die Breiten je Strip; davon
+            # gilt jetzt die erste fuer alle Listen des Fensters.
+            per_strip = window_info["configuration"].get("strip_header_sizes", [])
             if per_strip:
-                for tree, strip_sizes in zip(plot.channel_lists(), per_strip, strict=False):
-                    tree.set_header_sizes(strip_sizes)
-                    tree.user_header_sizes = True
-            else:
-                for tree in plot.channel_lists():
-                    if not tree.user_header_sizes:
-                        tree.set_header_sizes(sizes)
+                sizes = per_strip[0]
+
+            plot.apply_header_sizes(sizes)
+            plot.set_list_width(width)
 
         elif "channels_header" in window_info["configuration"]:
             width, sizes = window_info["configuration"]["channels_header"]
-            current_width = sum(plot.splitter.sizes())
-            plot.splitter.setSizes([width, max(current_width - width, 50)])
             for i, size in enumerate(sizes):
-                plot.channel_selection.setColumnWidth(i, size)
+                for tree in plot.channel_lists():
+                    tree.setColumnWidth(i, size)
+                    tree.user_header_sizes = True
+            plot.set_list_width(width)
 
         # keep compatibility with older asammdf versions
         if "channels_header_columns_visiblity" in window_info["configuration"]:
@@ -4365,9 +4359,6 @@ class WithMDIArea:
 
         plot.set_locked(locked=window_info["configuration"].get("locked", False))
         plot.hide_axes(hide=window_info["configuration"].get("hide_axes", False))
-        plot.hide_selected_channel_value(
-            hide=window_info["configuration"].get("hide_selected_channel_value_panel", True)
-        )
         plot.toggle_bookmarks(hide=window_info["configuration"].get("hide_bookmarks", False))
         plot.toggle_focused_mode(focused=window_info["configuration"].get("focused_mode", False))
         plot.toggle_region_values_display_mode(mode=window_info["configuration"].get("delta_mode", "value"))

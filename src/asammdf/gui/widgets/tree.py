@@ -683,6 +683,13 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         self.user_header_sizes = True
         self._header_size_timer.start()
 
+        # Alle Listen eines Plotfensters halten dieselben Breiten -
+        # sie stehen untereinander, da waeren unterschiedliche
+        # Spalten nur Unruhe.
+        fenster = getattr(self, "plot", None)
+        if fenster is not None and hasattr(fenster, "spread_header_sizes"):
+            fenster.spread_header_sizes(self)
+
     def resize_columns_to_contents(self, *columns):
         """Automatisch anpassen, ohne es als Benutzereingriff zu werten."""
         self._restoring_header_sizes = True

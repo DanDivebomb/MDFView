@@ -1556,7 +1556,6 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                                     "channels_header": [732, [568, 83, 41, 20, 20, 0]],
                                     "channels_header_columns_visible": [True, True, True, True, True, False],
                                     "hide_axes": False,
-                                    "hide_selected_channel_value_panel": False,
                                     "focused_mode": False,
                                     "delta_mode": "delta",
                                     "hide_bookmarks": True,
