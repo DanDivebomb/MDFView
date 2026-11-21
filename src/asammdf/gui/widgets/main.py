@@ -1934,6 +1934,19 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
                     channels[name] = comment
 
+                # Schon offen? Dann nur nach vorne holen - zwei Fenster
+                # auf dieselben Funktionen wuerden sich gegenseitig
+                # ueberschreiben.
+                offen = getattr(file, "_functions_window", None)
+                if offen is not None:
+                    try:
+                        offen.show()
+                        offen.raise_()
+                        offen.activateWindow()
+                        return
+                    except RuntimeError:
+                        pass
+
                 dlg = FunctionsManagerDialog(
                     file.functions,
                     channels,
@@ -1942,23 +1955,49 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                     # Die Parameter gehoeren zur Pruefung dazu, aber
                     # nicht in das Feld: sie werden aus der
                     # Konfiguration erzeugt, nicht hier bearbeitet.
-                    extra_globals=parameters_to_code(file.parameters),
+                    # Als Funktion, damit immer der aktuelle Stand
+                    # gilt - das Parameterfenster kann daneben offen
+                    # stehen.
+                    extra_globals=partial(self.parameter_code, file),
                 )
-                dlg.setModal(True)
-                dlg.exec()
 
-                if dlg.pressed_button == "apply":
-                    original_definitions = dlg.original_definitions
-                    modified_definitions = dlg.modified_definitions
+                file._functions_window = dlg
+                dlg.applied.connect(partial(self.functions_applied, file, dlg))
+                dlg.finished.connect(partial(self.manager_closed, file, "_functions_window"))
+                file.destroyed.connect(dlg.close)
 
-                    if file.global_variables != dlg.global_variables:
-                        new_global_variables = dlg.global_variables
-                    else:
-                        new_global_variables = file.global_variables
+                dlg.setModal(False)
+                dlg.show()
 
-                    file.update_functions(
-                        original_definitions, modified_definitions, new_global_variables=new_global_variables
-                    )
+    def parameter_code(self, file):
+        """Parameter einer Messdatei als Code - fuer die Pruefung."""
+        try:
+            return parameters_to_code(getattr(file, "parameters", None))
+        except RuntimeError:
+            return ""
+
+    def manager_closed(self, file, merker, *args):
+        """Fenster ist zu - den Merker loeschen, damit F6/F8 neu oeffnet."""
+        try:
+            setattr(file, merker, None)
+        except RuntimeError:
+            pass
+
+    def functions_applied(self, file, dlg):
+        """Uebernehmen aus dem offenen Functions manager."""
+        if file.global_variables != dlg.global_variables:
+            new_global_variables = dlg.global_variables
+        else:
+            new_global_variables = file.global_variables
+
+        file.update_functions(
+            dlg.original_definitions,
+            dlg.modified_definitions,
+            new_global_variables=new_global_variables,
+        )
+
+        # Jetziger Stand ist der neue Vergleichsstand.
+        dlg.mark_applied()
 
     def parameter_manager(self):
         """Skalare, Kennlinien und Kennfelder der Konfiguration."""
@@ -1969,18 +2008,25 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         if not file:
             return
 
-        dlg = ParameterManagerDialog(file.parameters, parent=self)
-        dlg.setModal(True)
-        dlg.exec()
+        offen = getattr(file, "_parameter_window", None)
+        if offen is not None:
+            try:
+                offen.show()
+                offen.raise_()
+                offen.activateWindow()
+                return
+            except RuntimeError:
+                pass
 
-        if dlg.pressed_button != "apply":
-            return
+        # Das Fenster uebernimmt und rechnet selbst - es bleibt offen,
+        # damit man daneben weiterarbeiten kann.
+        dlg = ParameterManagerDialog(file_widget=file, parent=self)
 
-        file.parameters = dlg.parameters
+        file._parameter_window = dlg
+        dlg.finished.connect(partial(self.manager_closed, file, "_parameter_window"))
 
-        # Virtuelle Signale, die diese Parameter benutzen, neu rechnen.
-        if dlg.changed_names:
-            file.recompute_parameter_channels(dlg.changed_names)
+        dlg.setModal(False)
+        dlg.show()
 
     def bus_database_manager(self):
         dlg = BusDatabaseManagerDialog(parent=self)

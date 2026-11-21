@@ -21,6 +21,8 @@ from ..dialogs.range_editor import RangeEditor
 from ..mdfview_enums import conversion_of, enum_table, EnumColorsDialog, set_colors
 from ..serde import ExtendedJsonDecoder, ExtendedJsonEncoder, extract_mime_names
 from ..utils import (
+    FUNCTION_MIME,
+    PARAMETER_MIME,
     copy_ranges,
     get_color_using_ranges,
     get_colors_using_ranges,
@@ -833,6 +835,25 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
 
         window = self.plot
         owner = getattr(self, "owner_plot", None)
+
+        # Funktion aus dem Functions manager: auch ueber der
+        # Kanalliste soll der Abwurf gelten, nicht nur ueber der
+        # Zeichenflaeche daneben.
+        for format, ablegen in ((FUNCTION_MIME, "drop_function"), (PARAMETER_MIME, "drop_parameter")):
+            if not e.mimeData().hasFormat(format):
+                continue
+
+            e.accept()
+
+            if window is not None and hasattr(window, ablegen):
+                name = bytes(e.mimeData().data(format)).decode("utf-8")
+                getattr(window, ablegen)(name, owner)
+
+            if hasattr(window, "strip_hint_hide"):
+                window.strip_hint_hide()
+
+            return
+
         offset = window.strip_hint_take() if hasattr(window, "strip_hint_take") else 0
 
         # Zug aus einer Kanalliste dieses Fensters - auch aus dieser hier,

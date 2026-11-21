@@ -24,7 +24,8 @@ from ...blocks.cutils import get_idx_with_edges, positions
 from ...blocks.utils import target_byte_order
 from ..dialogs.messagebox import MessageBox
 from ..function_library import FunctionLibrary
-from ..utils import FONT_SIZE, value_as_str
+from ..mdfview_parameters import function_for, function_name_for
+from ..utils import FONT_SIZE, FUNCTION_MIME, PARAMETER_MIME, value_as_str
 from .viewbox import ViewBoxWithCursor
 
 LOCAL_TIMEZONE = dateutil.tz.tzlocal()
@@ -2088,7 +2089,7 @@ class Plot(QtWidgets.QWidget):
 
         self.splitter.addWidget(right)
 
-        self.strip_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.strip_splitter))
+        self.strip_splitter.splitterMoved.connect(lambda *_: self._strip_heights_changed())
         self.list_splitter.splitterMoved.connect(lambda *_: self._sync_strip_heights(self.list_splitter))
 
         self.info = ChannelStats(
@@ -2146,6 +2147,12 @@ class Plot(QtWidgets.QWidget):
         # Wurde die Breite der linken Spalte von Hand oder aus einer
         # Konfiguration gesetzt? Dann nicht mehr automatisch anpassen.
         self._user_splitter = False
+
+        # Gewuenschte Aufteilung (Konfiguration oder Benutzer) und ob das
+        # Fenster ueberhaupt schon einmal zu sehen war.
+        self._list_width_wish = 0
+        self._strip_sizes_wish = None
+        self._je_sichtbar = False
         self.splitter.splitterMoved.connect(self.set_splitter)
 
         self.toggle_focused_mode(focused=self._settings.value("plot/focused_mode", False, type=bool))
@@ -3266,12 +3273,85 @@ class Plot(QtWidgets.QWidget):
 
         return 0
 
+    def _strip_heights_changed(self):
+        """Der Benutzer hat eine Trennlinie zwischen Strips gezogen."""
+        self._sync_strip_heights(self.strip_splitter)
+
+        sizes = [int(e) for e in self.strip_splitter.sizes()]
+        if all(sizes):
+            self._strip_sizes_wish = sizes
+
+    def showEvent(self, event):
+        """Ab jetzt stimmen die Masse dieses Fensters."""
+        super().showEvent(event)
+        self._je_sichtbar = True
+
+    def reapply_layout(self):
+        """Gewuenschte Aufteilung noch einmal setzen.
+
+        Fuer Fenster, die auf einer verdeckten Seite entstanden sind:
+        dort verteilt ein Splitter nichts, weil es nichts zu verteilen
+        gibt. Sobald die Seite zu sehen ist, stimmen die Masse.
+        """
+        self._je_sichtbar = True
+
+        breite = int(getattr(self, "_list_width_wish", 0) or 0)
+        if breite:
+            gesamt = sum(self.splitter.sizes())
+            if gesamt > breite + 50:
+                self.splitter.setSizes([breite, gesamt - breite, 0])
+
+        hoehen = [int(e) for e in getattr(self, "_strip_sizes_wish", None) or []]
+        if hoehen and len(hoehen) == self.strip_splitter.count():
+            verfuegbar = sum(self.strip_splitter.sizes())
+            summe = sum(hoehen)
+
+            # Die Verhaeltnisse zaehlen, nicht die absoluten Punkte: das
+            # Fenster kann inzwischen eine andere Hoehe haben.
+            if verfuegbar > 50 and summe:
+                skaliert = [max(int(hoehe * verfuegbar / summe), 20) for hoehe in hoehen]
+                self.strip_splitter.setSizes(skaliert)
+                self._sync_strip_heights(self.strip_splitter)
+
+        self._schedule_column_sync()
+
+    def _nie_vermessen(self):
+        """Hatte dieses Fenster noch nie eine brauchbare Groesse?
+
+        Auf einer verdeckten Seite gibt es nichts zu verteilen, und beide
+        Splitter melden ihre Minimalwerte - 46 Punkte fuer die
+        Kanalspalte, 2 Punkte je Strip. Solche Zahlen will man nicht in
+        der Konfiguration haben.
+        """
+        return sum(self.splitter.sizes()) < 200
+
+    def layout_for_config(self):
+        """Listenbreite und Strip-Hoehen fuer die Konfiguration.
+
+        Hat das Fenster noch keine brauchbare Groesse gesehen, gelten die
+        gewuenschten Werte - aus der Konfiguration oder vom Benutzer
+        gezogen. Sonst das Gemessene.
+        """
+        breite = int(self.splitter.sizes()[0])
+        hoehen = [int(e) for e in self.strip_splitter.sizes()]
+
+        if self._nie_vermessen():
+            breite = int(getattr(self, "_list_width_wish", 0) or 0) or breite
+
+            wunsch = [int(e) for e in getattr(self, "_strip_sizes_wish", None) or []]
+            if len(wunsch) == len(hoehen):
+                hoehen = wunsch
+
+        return breite, hoehen
+
     def set_strip_sizes(self, sizes):
         """Hoehen der Strips aus der Konfiguration uebernehmen."""
         sizes = [int(e) for e in sizes or []]
 
         if len(sizes) != self.strip_splitter.count() or not all(sizes):
             return
+
+        self._strip_sizes_wish = list(sizes)
 
         self.strip_splitter.setSizes(sizes)
         self._sync_strip_heights(self.strip_splitter)
@@ -4417,6 +4497,12 @@ class Plot(QtWidgets.QWidget):
         if width < 100:
             width = max(self.header_width(), 150)
 
+        # Als Wunsch merken. Entsteht das Fenster auf einer verdeckten
+        # Seite, hat der Splitter keinen Platz zu verteilen und schiebt
+        # alles auf sein Minimum zusammen - gespeichert wuerde dann diese
+        # Minimalbreite. Der Wunsch ueberlebt das.
+        self._list_width_wish = width
+
         gesamt = sum(self.splitter.sizes())
         self.splitter.setSizes([width, max(gesamt - width, 50), 0])
         self._user_splitter = True
@@ -4945,7 +5031,12 @@ class Plot(QtWidgets.QWidget):
         self.set_font_size(new_size)
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasFormat("application/octet-stream-asammdf"):
+        daten = e.mimeData()
+        if (
+            daten.hasFormat("application/octet-stream-asammdf")
+            or daten.hasFormat(FUNCTION_MIME)
+            or daten.hasFormat(PARAMETER_MIME)
+        ):
             e.accept()
         super().dragEnterEvent(e)
 
@@ -5072,6 +5163,63 @@ class Plot(QtWidgets.QWidget):
         self.strip_hint_update(self.strip_area_at(QtGui.QCursor.pos()), e.position().toPoint())
         e.accept()
 
+    def drop_function(self, name, strip=None):
+        """Aus einer abgelegten Funktion ein virtuelles Signal machen.
+
+        Welcher Kanal auf welches Argument kommt, kann niemand erraten -
+        das fragt der Dialog. Er geht erst auf, wenn der Abwurf fertig
+        verarbeitet ist: ein Fenster mitten im Ziehvorgang bringt die
+        Maus durcheinander.
+        """
+        if not name:
+            return
+
+        ziel = strip if strip in self.strips else self.plot
+
+        self.set_active_strip(ziel)
+
+        QtCore.QTimer.singleShot(0, partial(ziel.insert_computation, name))
+
+    def drop_parameter(self, name, strip=None):
+        """Aus einem abgelegten Parameter ein virtuelles Signal machen.
+
+        Die Funktion dazu schreibt das Programm: eine Zeile, die die
+        Kennlinie oder das Kennfeld auswertet. Sie landet unter einem
+        sprechenden Namen bei den Funktionen und ist dort danach wie
+        jede andere zu bearbeiten. Im Dialog ordnest du nur noch zu,
+        welcher Kanal auf die x-Achse kommt (beim Kennfeld auch y).
+        """
+        if not name:
+            return
+
+        owner = getattr(self, "owner", None)
+        info = (getattr(owner, "parameters", None) or {}).get(name) if owner is not None else None
+
+        if info is None:
+            MessageBox.warning(
+                self,
+                "Parameter not found",
+                f'There is no parameter called "{name}". Create it in the Parameter Manager (F8).',
+            )
+            return
+
+        art = info.get("type", "scalar")
+        funktion = function_name_for(name, art)
+        text = function_for(name, art, info)
+
+        # Vorhandene Funktion gleichen Namens nicht ueberschreiben, wenn
+        # sie schon genau so aussieht - sonst gilt sie als geaendert.
+        if owner.functions.get(funktion) != text:
+            owner.functions[funktion] = text
+
+        ziel = strip if strip in self.strips else self.plot
+        self.set_active_strip(ziel)
+
+        QtCore.QTimer.singleShot(
+            0,
+            partial(ziel.insert_computation, funktion, channel_name=name, unit=info.get("unit", "")),
+        )
+
     def dragLeaveEvent(self, e):
         self.strip_hint_hide()
         super().dragLeaveEvent(e)
@@ -5079,6 +5227,29 @@ class Plot(QtWidgets.QWidget):
     def dropEvent(self, e):
         strip = self.strip_at(QtGui.QCursor.pos())
         offset = self.strip_hint_take()
+
+        # Funktion aus dem Functions manager: daraus wird ein virtuelles
+        # Signal, der Dialog fragt die Argumente ab.
+        if e.mimeData().hasFormat(FUNCTION_MIME):
+            e.accept()
+
+            # Die Abwurfstelle aus dem Ereignis, nicht aus der
+            # Mausposition: beim Abwurf steht der Zeiger nicht
+            # zwangslaeufig noch dort.
+            ziel = self.strip_at(self.mapToGlobal(e.position().toPoint())) or strip
+
+            self.drop_function(bytes(e.mimeData().data(FUNCTION_MIME)).decode("utf-8"), ziel)
+            return
+
+        # Parameter aus dem Parameter manager: die passende Funktion
+        # entsteht von selbst.
+        if e.mimeData().hasFormat(PARAMETER_MIME):
+            e.accept()
+
+            ziel = self.strip_at(self.mapToGlobal(e.position().toPoint())) or strip
+
+            self.drop_parameter(bytes(e.mimeData().data(PARAMETER_MIME)).decode("utf-8"), ziel)
+            return
 
         source = e.source()
 
@@ -5781,6 +5952,11 @@ class Plot(QtWidgets.QWidget):
         # Ab jetzt gilt die Breite als gewuenscht und wird nicht mehr
         # automatisch nachgerechnet.
         self._user_splitter = True
+
+        breite = self.splitter.sizes()[0]
+        if breite:
+            self._list_width_wish = int(breite)
+
         self.splitter_moved.emit(self, pos)
 
     def set_timestamp(self, stamp):
@@ -5895,18 +6071,19 @@ class Plot(QtWidgets.QWidget):
 
             return channels
 
+        # Aufteilung: fuer Fenster auf verdeckten Seiten die gewuenschten
+        # Werte, sonst die gemessenen (siehe layout_for_config).
+        config_list_width, config_strip_sizes = self.layout_for_config()
+
         config = {
             "channels": all_strips_to_config() if not self.pattern else [],
             "strip_count": len(self.strips),
-            "strip_sizes": [int(e) for e in self.strip_splitter.sizes()],
+            "strip_sizes": config_strip_sizes,
             "strip_digital": [bool(getattr(strip, "digital_mode", False)) for strip in self.strips],
             "strip_modes": [self.window_mode(strip) for strip in self.strips],
             "strip_x_channels": [self._x_channel_name(strip) for strip in self.strips],
             "pattern": self.pattern,
-            "splitter": [int(e) for e in self.splitter.sizes()[:2]]
-            + [
-                0,
-            ],
+            "splitter": [config_list_width, max(sum(self.splitter.sizes()[:2]) - config_list_width, 0), 0],
             "x_range": self.plot.viewbox.viewRange()[0],
             "y_axis_width": self.plot.y_axis.stored_width(),
             "grid": [
@@ -5918,12 +6095,12 @@ class Plot(QtWidgets.QWidget):
             "locked": self.locked,
             "common_axis_y_range": [float(e) for e in self.plot.common_axis_y_range],
             "channels_header": [
-                self.splitter.sizes()[0],
+                config_list_width,
                 [self.channel_selection.columnWidth(i) for i in range(self.channel_selection.columnCount())],
             ],
             # Eine Spaltenaufteilung fuer das ganze Fenster: alle Listen
             # eines Plots halten dieselben Breiten.
-            "channels_header_sizes": [self.splitter.sizes()[0], self.channel_selection.header_sizes()],
+            "channels_header_sizes": [config_list_width, self.channel_selection.header_sizes()],
             "channels_header_columns_visible": [
                 not self.channel_selection.isColumnHidden(i)
                 for i in range(self.channel_selection.columnCount())
@@ -6931,7 +7108,12 @@ class PlotGraphics(pg.PlotWidget):
         self.update()
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasFormat("application/octet-stream-asammdf"):
+        daten = e.mimeData()
+        if (
+            daten.hasFormat("application/octet-stream-asammdf")
+            or daten.hasFormat(FUNCTION_MIME)
+            or daten.hasFormat(PARAMETER_MIME)
+        ):
             e.accept()
 
         super().dragEnterEvent(e)
@@ -7022,6 +7204,26 @@ class PlotGraphics(pg.PlotWidget):
         # sonst landen die Kanaele in irgendeinem anderen.
         if parent is not None and hasattr(parent, "set_active_strip"):
             parent.set_active_strip(target)
+
+        # Funktion aus dem Functions manager: das Fenster entscheidet,
+        # hier ist nur bekannt, auf welchem Strip sie gelandet ist.
+        if e.mimeData().hasFormat(FUNCTION_MIME):
+            e.accept()
+
+            name = bytes(e.mimeData().data(FUNCTION_MIME)).decode("utf-8")
+            if parent is not None and hasattr(parent, "drop_function"):
+                parent.drop_function(name, target)
+
+            return
+
+        if e.mimeData().hasFormat(PARAMETER_MIME):
+            e.accept()
+
+            name = bytes(e.mimeData().data(PARAMETER_MIME)).decode("utf-8")
+            if parent is not None and hasattr(parent, "drop_parameter"):
+                parent.drop_parameter(name, target)
+
+            return
 
         own_list = getattr(self, "channel_list", None)
         if own_list is not None and e.source() is own_list and target is self:
@@ -7162,7 +7364,7 @@ class PlotGraphics(pg.PlotWidget):
             self._timestamps_indexes[key] = index
             return index
 
-    def insert_computation(self, name=""):
+    def insert_computation(self, name="", channel_name="", unit=""):
         functions = self.plot_parent.owner.functions
         if not ChainMap(functions, FunctionLibrary):
             MessageBox.warning(
@@ -7180,6 +7382,17 @@ class PlotGraphics(pg.PlotWidget):
             global_variables=self.plot_parent.owner.effective_global_variables(),
             parent=self,
         )
+
+        # Kommt die Funktion aus dem Zug, steht sie schon drin.
+        if name:
+            dlg.functions.setCurrentText(name)
+
+        if channel_name:
+            dlg.name.setText(channel_name)
+
+        if unit:
+            dlg.unit.setText(unit)
+
         dlg.setModal(True)
         dlg.exec()
         computed_channel = dlg.payload

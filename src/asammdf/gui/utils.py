@@ -153,6 +153,57 @@ COMPRESSION_OPTIONS = {
 }
 
 
+# Zugformat fuer eine Funktion aus dem Functions manager. Zieht man sie
+# auf einen Strip, oeffnet sich der Dialog fuer das virtuelle Signal.
+def wildcard_pattern(text):
+    """Suchtext mit * und ? als Platzhalter in ein Suchmuster umsetzen.
+
+    So wie im Explorer, in INCA oder MDA: * steht fuer beliebig viele
+    Zeichen, ? fuer genau eines, alles andere gilt woertlich.
+    """
+    teile = []
+
+    for zeichen in text or "":
+        if zeichen == "*":
+            teile.append(".*")
+        elif zeichen == "?":
+            teile.append(".")
+        else:
+            teile.append(re.escape(zeichen))
+
+    return "".join(teile)
+
+
+FUNCTION_MIME = "application/x-mdfview-function"
+
+# Dasselbe fuer einen Parameter: Skalar, Kennlinie oder Kennfeld.
+PARAMETER_MIME = "application/x-mdfview-parameter"
+
+
+# Wie oft derselbe Fehler zuletzt kam: {Meldung: (Anzahl, Zeitpunkt)}.
+# Ein Fehler, der an einem Mausereignis haengt, kommt sonst bei jeder
+# Bewegung neu - mit einem Fenster pro Mal ist das Programm nur noch
+# ueber den Taskmanager zu beenden.
+_LETZTE_FEHLER = {}
+
+# So viele Fenster pro Meldung, danach nur noch auf die Konsole.
+FEHLER_FENSTER_GRENZE = 3
+
+# Nach dieser Ruhe gilt eine Meldung wieder als neu (Sekunden).
+FEHLER_RUHE = 60.0
+
+
+def fehler_zu_oft(meldung):
+    """Kam diese Meldung gerade schon zu oft fuer ein weiteres Fenster?"""
+    jetzt = time.monotonic()
+    anzahl, zuletzt = _LETZTE_FEHLER.get(meldung, (0, 0.0))
+
+    anzahl = anzahl + 1 if jetzt - zuletzt < FEHLER_RUHE else 1
+    _LETZTE_FEHLER[meldung] = (anzahl, jetzt)
+
+    return anzahl > FEHLER_FENSTER_GRENZE
+
+
 def excepthook(exc_type, exc_value, tracebackobj):
     """Global function to catch unhandled exceptions.
 
@@ -181,6 +232,13 @@ def excepthook(exc_type, exc_value, tracebackobj):
 
     print("".join(traceback.format_tb(tracebackobj)))
     print(f"{exc_type}: {exc_value}")
+
+    if fehler_zu_oft(errmsg):
+        print(
+            f"(dieselbe Meldung kam schon {FEHLER_FENSTER_GRENZE} mal - "
+            "kein weiteres Fenster, siehe Konsole)"
+        )
+        return
 
     ErrorDialog(message=errmsg, trace=msg, title="The following error was triggered").exec()
 
@@ -498,6 +556,18 @@ def compute_signal(
 
                 if function_name == description["function"]:
                     func, trace = _func, _trace
+
+            if func is None:
+                # Der Kanal zeigt auf einen Namen, den es als Schluessel
+                # nicht gibt. Dann zaehlt, welche Definition eine
+                # Funktion dieses Namens anlegt - sonst waere das
+                # virtuelle Signal nach einer Umbenennung leer.
+                for definition in functions.values():
+                    _func, _trace = generate_python_function(definition, in_globals=_globals)
+
+                    if _func is not None and _func.__name__ == description["function"]:
+                        func, trace = _func, _trace
+                        break
 
             if func is None:
                 if description["function"] in FunctionLibrary:

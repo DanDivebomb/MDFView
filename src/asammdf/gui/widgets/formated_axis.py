@@ -336,7 +336,9 @@ class FormatedAxis(pg.AxisItem):
         darueber hinaus, unten bis in die Zeitskala. Mittig zur Achse
         heisst deshalb zu tief, und oben bleibt Platz liegen.
         """
-        view = self.linkedView()
+        # Waehrend pyqtgraph die Achse noch baut, gibt es _linkedView
+        # noch nicht - linkedView() liefe in einen AttributeError.
+        view = self.linkedView() if hasattr(self, "_linkedView") else None
 
         if view is not None:
             try:
@@ -374,6 +376,14 @@ class FormatedAxis(pg.AxisItem):
         # Beim Schliessen des Fensters ist die Beschriftung schon weg,
         # die Zeitgeber laufen aber noch einmal ab.
         if self.label is None:
+            return
+
+        # pyqtgraph ruft setLabel schon in seinem Konstruktor - also
+        # bevor _linkedView ueberhaupt angelegt ist. Dann gibt es
+        # noch keine Zeichenflaeche, an der sich die Beschriftung
+        # ausrichten koennte; das passiert beim ersten
+        # Groessenereignis.
+        if not hasattr(self, "_linkedView"):
             return
 
         marke = f"refit    id={id(self) % 10000} lage={self.orientation}"

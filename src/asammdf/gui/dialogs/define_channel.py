@@ -4,6 +4,7 @@ import inspect
 import os
 import re
 
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...signal import Signal
@@ -12,6 +13,7 @@ from ..mdfview_geometry import remember_geometry
 from ..ui.define_channel_dialog import Ui_ComputedChannel
 from ..utils import (
     computation_to_python_function,
+    generate_python_function,
     generate_python_function_globals,
     generate_python_variables,
 )
@@ -42,6 +44,11 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         _in_globals = generate_python_function_globals()
         ret = generate_python_variables(global_variables, in_globals=_in_globals)
         self.global_variables = {name: val for name, val in _in_globals.items() if isinstance(val, (int, float))}
+
+        # Derselbe Namensraum wie beim Rechnen: nur darin kennt eine
+        # Funktion die Parameter (P, KL, KF) und die globalen
+        # Variablen. Die Probe unten braucht ihn.
+        self._func_globals = _in_globals
 
         self.setWindowFlags(QtCore.Qt.WindowType.WindowMinMaxButtonsHint | self.windowFlags())
 
@@ -114,6 +121,11 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
                     self.arg_widgets[i][1].insertPlainText("\n".join(names))
                     self.arg_widgets[i][3].setChecked(use_raw_values.get(arg_name, False))
 
+            # Die gespeicherte Wahl gilt, auch wenn die Probe oben
+            # etwas anderes vorgeschlagen hat.
+            self.sample_by_sample.setEnabled(True)
+            self.complete_signal.setEnabled(True)
+
             if computation.get("computation_mode", "sample_by_sample") == "sample_by_sample":
                 self.sample_by_sample.setChecked(True)
             else:
@@ -135,7 +147,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         self.func_name_label.setMinimumSize(QtCore.QSize(self.triggering_on_all.width() - 1, 0))
 
         # Nicht mehr bildschirmfuellend: die Groesse vom letzten Mal.
-        remember_geometry(self, "define_channel", (1250, 850))
+        remember_geometry(self, "define_channel", (1000, 600))
 
     def apply(self):
         if not self.functions.currentIndex() >= 0:
@@ -225,8 +237,16 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         else:
 
             definition = self._functions[name]
-            exec(definition.replace("\t", "    "))
-            func = locals()[name]
+
+            # In einen eigenen Namensraum, nicht nach locals():
+            # ab Python 3.13 schreibt exec() nicht mehr in die
+            # lokalen Namen einer Funktion (PEP 667), locals()[name]
+            # lief dort in einen KeyError - und danach war der
+            # Dialog hin. Der Namensraum der Berechnung ist
+            # ausserdem der richtige: dort sind P, KL und KF bekannt.
+            namensraum = dict(self._func_globals)
+            exec(definition.replace("\t", "    "), namensraum)
+            func = namensraum[name]
 
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(":/search.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
@@ -240,6 +260,16 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             label = QtWidgets.QLabel(arg_name)
             self.arg_layout.addWidget(label, row, 0)
             text_edit = QtWidgets.QPlainTextEdit()
+
+            # Drei Zeilen reichen: meist steht hier ein einziger
+            # Kanalname. Mehrere Zeilen sind Ersatznamen, die man
+            # selten braucht - dafuer laesst sich rollen. Vorher
+            # war jedes Feld so hoch, dass der Dialog kaum auf den
+            # Bildschirm passte.
+            zeilenhoehe = QtGui.QFontMetricsF(text_edit.font()).lineSpacing()
+            text_edit.setMaximumHeight(int(zeilenhoehe * 3) + 12)
+            text_edit.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
             self.arg_layout.addWidget(text_edit, row, 1)
             button = QtWidgets.QPushButton("")
             button.setIcon(icon)
@@ -263,6 +293,83 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
 
         self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
         self.arg_widgets.append(spacer)
+
+        self.preselect_mode(name)
+
+    def probe_modes(self, name):
+        """Welche Rechenart kann diese Funktion?
+
+        Einmal mit einzelnen Zahlen aufrufen, einmal mit Feldern -
+        genauso, wie es die Pruefung im Functions manager macht.
+        Liefert (punktweise, ganzes Signal).
+        """
+        if name in FunctionLibrary:
+            func = FunctionLibrary[name]
+        else:
+            func, trace = generate_python_function(
+                self._functions.get(name, ""), in_globals=dict(self._func_globals)
+            )
+            if func is None:
+                return True, True
+
+        try:
+            argumente = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            return True, True
+
+        punktweise = True
+        try:
+            ergebnis = func(**{arg: wert.default for arg, wert in argumente.items()})
+        except ZeroDivisionError:
+            pass
+        except Exception:
+            punktweise = False
+        else:
+            punktweise = isinstance(ergebnis, (int, float, np.integer, np.floating))
+
+        ganzes = True
+        felder = {arg: np.ones(1000, dtype="i8") * (wert.default or 0) for arg, wert in argumente.items()}
+        felder["t"] = np.arange(1000) * 0.1
+        try:
+            ergebnis = func(**felder)
+        except ZeroDivisionError:
+            pass
+        except Exception:
+            ganzes = False
+        else:
+            ganzes = isinstance(ergebnis, (tuple, list, np.ndarray)) and np.ndim(ergebnis) == 1
+
+        return punktweise, ganzes
+
+    def preselect_mode(self, name):
+        """Rechenart vorschlagen, statt sie raten zu lassen.
+
+        Kann die Funktion nur eine der beiden Arten, steht die andere
+        nicht mehr zur Wahl - sonst kommt der Fehler erst beim
+        Rechnen. Koennen beide, gilt das ganze Signal: dieselbe
+        Rechnung, nur deutlich schneller.
+        """
+        punktweise, ganzes = self.probe_modes(name)
+
+        self.sample_by_sample.setEnabled(punktweise or not ganzes)
+        self.complete_signal.setEnabled(ganzes or not punktweise)
+
+        if ganzes:
+            self.complete_signal.setChecked(True)
+        elif punktweise:
+            self.sample_by_sample.setChecked(True)
+
+        if punktweise and ganzes:
+            hinweis = "Beides geprueft - das ganze Signal ist schneller."
+        elif ganzes:
+            hinweis = "Geprueft: nur als ganzes Signal (die Funktion rechnet mit Feldern)."
+        elif punktweise:
+            hinweis = "Geprueft: nur Punkt fuer Punkt (die Funktion rechnet mit einzelnen Zahlen)."
+        else:
+            hinweis = "Keine der beiden Arten lief mit Testwerten durch - bitte selbst waehlen."
+
+        for knopf in (self.sample_by_sample, self.complete_signal):
+            knopf.setToolTip(hinweis)
 
     def search_argument(self, *args, index=0):
         dlg = AdvancedSearch(

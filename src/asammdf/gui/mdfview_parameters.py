@@ -29,6 +29,7 @@ Randwert gehalten (kein Extrapolieren) - wie in INCA und MDA.
 """
 
 from keyword import iskeyword
+import re
 
 TYPES = ("scalar", "curve", "map")
 
@@ -99,6 +100,25 @@ def is_valid_name(name):
     name = (name or "").strip()
 
     return bool(name) and name.isidentifier() and not iskeyword(name) and name not in ("P", "KL", "KF", "PARAMETER")
+
+
+def safe_name(name):
+    """Namen so umschreiben, dass er als Python-Name taugt.
+
+    Aus DCM- und CDFX-Dateien kommen Namen wie "Mot.Eta[0]" - im Code
+    waere das kein Name. Punkte, Klammern und sonstige Zeichen werden
+    zu Unterstrichen.
+    """
+    sauber = re.sub(r"\W", "_", name or "")
+
+    if not sauber or sauber[0].isdigit():
+        sauber = f"p_{sauber}"
+
+    # Schluesselwoerter und die drei belegten Namen
+    while sauber and not is_valid_name(sauber):
+        sauber = f"{sauber}_"
+
+    return sauber
 
 
 def new_parameter(kind):
@@ -197,3 +217,57 @@ def used_in(definition, names):
         return False
 
     return any(name and name in definition for name in names)
+
+
+def function_name_for(name, kind):
+    """Name der Funktion, die diesen Parameter auswertet."""
+    vorsatz = {"scalar": "P", "curve": "KL", "map": "KF"}.get(kind, "P")
+
+    return f"{vorsatz}_{name}"
+
+
+def axis_argument(info, achse, ersatz):
+    """Wie soll das Argument fuer diese Achse heissen?
+
+    Steht in der DCM- oder CDFX-Datei ein Name fuer die Achse, gilt
+    der - dann steht im Dialog fuer das virtuelle Signal nicht nur
+    "x", sondern gleich, welche Groesse dort hingehoert. Sonst bleibt
+    es bei x und y.
+    """
+    gewuenscht = (info or {}).get(f"{achse}_name", "")
+
+    if not gewuenscht:
+        return ersatz
+
+    sauber = safe_name(gewuenscht)
+
+    return sauber if sauber and sauber != "t" else ersatz
+
+
+def function_for(name, kind, info=None):
+    """Funktionstext, der diesen Parameter auswertet.
+
+    Damit braucht man fuer ein virtuelles Signal aus einer Kennlinie
+    keine eigene Funktion mehr zu schreiben: zieht man den Parameter in
+    einen Strip, entsteht diese hier und wird gleich eingesetzt. Sie
+    steht danach im Functions manager und laesst sich dort wie jede
+    andere weiterbearbeiten.
+    """
+    funktion = function_name_for(name, kind)
+
+    if kind == "curve":
+        x = axis_argument(info, "x", "x")
+
+        return f'def {funktion}({x}=0, t=0):\n    return KL("{name}", {x})\n'
+
+    if kind == "map":
+        x = axis_argument(info, "x", "x")
+        y = axis_argument(info, "y", "y")
+
+        if y == x:
+            y = f"{y}_2"
+
+        return f'def {funktion}({x}=0, {y}=0, t=0):\n    return KF("{name}", {x}, {y})\n'
+
+    # Skalar: ohne Kanal gibt es keine Zeitachse, also ueber t
+    return f'def {funktion}(t=0):\n    return P("{name}") * np.ones_like(t)\n'

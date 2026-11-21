@@ -13,40 +13,32 @@ Benutzung am Ende von __init__ eines Dialogs:
     remember_geometry(self, "define_channel", (1200, 800))
 
 Der zweite Wert ist die Groesse beim allerersten Oeffnen.
+
+Gemerkt wird beim Schliessen ueber das Signal finished - QDialog
+schickt es bei OK, bei Abbrechen und beim Kreuz. Ein Ereignisfilter
+stand hier vorher und war ein Fehler: ein eigener QObject bekommt von
+PySide seine Python-Seite neu gebaut, wenn nur noch C++ ihn haelt -
+ohne __init__, also ohne die gemerkten Felder. Der Filter lief dann in
+einen AttributeError, der Fehlerdialog loeste das naechste Ereignis
+aus, und das Programm war in einer Schleife aus Fehlerfenstern
+gefangen.
 """
 
 from PySide6 import QtCore, QtWidgets
 
 
-class _GeometryKeeper(QtCore.QObject):
-    """Schreibt die Groesse weg, sobald der Dialog zugeht.
-
-    Als Ereignisfilter, damit die Dialoge selbst nichts ueberschreiben
-    muessen - closeEvent und reject gehen beide durch Hide.
-    """
-
-    def __init__(self, dialog, key):
-        super().__init__(dialog)
-        self._dialog = dialog
-        self._key = key
-
-    def eventFilter(self, obj, event):
-        if obj is self._dialog and event.type() in (
-            QtCore.QEvent.Type.Hide,
-            QtCore.QEvent.Type.Close,
-        ):
-            store_geometry(self._dialog, self._key)
-
-        return False
-
-
 def store_geometry(dialog, key):
     """Groesse und Lage eines Dialogs merken."""
-    if dialog.isMinimized():
-        return
+    try:
+        if dialog.isMinimized():
+            return
 
-    QtCore.QSettings().setValue(f"dialogs/{key}/geometry", dialog.saveGeometry())
-    QtCore.QSettings().setValue(f"dialogs/{key}/maximized", dialog.isMaximized())
+        settings = QtCore.QSettings()
+        settings.setValue(f"dialogs/{key}/geometry", dialog.saveGeometry())
+        settings.setValue(f"dialogs/{key}/maximized", dialog.isMaximized())
+    except RuntimeError:
+        # Dialog ist schon abgeraeumt - dann gibt es nichts zu merken.
+        pass
 
 
 def remember_geometry(dialog, key, default_size=None):
@@ -76,5 +68,9 @@ def remember_geometry(dialog, key, default_size=None):
     if settings.value(f"dialogs/{key}/maximized", False, type=bool):
         dialog.showMaximized()
 
-    # Der Filter haengt am Dialog und stirbt mit ihm.
-    dialog.installEventFilter(_GeometryKeeper(dialog, key))
+    # finished kommt von QDialog. Alles andere (ein Fenster, das kein
+    # Dialog ist) behaelt seine Groesse eben nicht - besser als ein
+    # Filter, der im Fehlerfall das Programm lahmlegt.
+    signal = getattr(dialog, "finished", None)
+    if signal is not None:
+        signal.connect(lambda _ergebnis=0: store_geometry(dialog, key))

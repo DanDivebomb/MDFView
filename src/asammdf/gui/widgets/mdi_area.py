@@ -36,7 +36,7 @@ from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.channel_info import ChannelInfoDialog
 from ..dialogs.messagebox import MessageBox
 from ..dialogs.window_selection_dialog import WindowSelectionDialog
-from ..mdfview_parameters import parameters_to_code, used_in
+from ..mdfview_parameters import parameters_to_code
 from ..serde import extract_mime_names
 from ..utils import (
     computation_to_python_function,
@@ -628,8 +628,18 @@ class MdiAreaMixin:
         geometry = window.geometry()
         geometry.setSize(QtCore.QSize(400, 400))
         window.setGeometry(geometry)
-        window.resized.connect(self.window_resized)
-        window.moved.connect(self.window_moved)
+
+        # Ueber eine kleine Zwischenfunktion, nicht direkt auf die
+        # Methode: so haelt die Verbindung die Python-Seite dieses
+        # Fensterbereichs fest. Haelt sie nur C++ - etwa weil der
+        # Bereich bloss in einem Reiter steckt -, raeumt PySide die
+        # Python-Seite weg und baut sie spaeter neu auf. Die
+        # Verbindung zeigt dann ins Leere, und jedes Verschieben
+        # eines Fensters endet in "Slot 'MdiAreaWidget::' not
+        # found".
+        window.resized.connect(lambda *args, bereich=self: bereich.window_resized(*args))
+        window.moved.connect(lambda *args, bereich=self: bereich.window_moved(*args))
+
         return super().addSubWindow(window)
 
     def clear_windows(self):
@@ -3462,7 +3472,7 @@ class WithMDIArea:
     def delete_functions(self, deleted_functions):
         deleted = set()
         for info in deleted_functions:
-            del self.functions[info["name"]]
+            self.functions.pop(info["name"], None)
             deleted.add(info["name"])
 
         for mdi in self.all_sub_windows():
@@ -3485,13 +3495,20 @@ class WithMDIArea:
         return "\n".join(teile)
 
     def recompute_parameter_channels(self, names=None):
-        """Virtuelle Signale neu rechnen, die von Parametern abhaengen.
+        """Alle virtuellen Signale neu rechnen.
 
-        Ohne names alle. Mit names nur die, deren Funktionstext einen
-        dieser Parameternamen enthaelt - bei grossen Konfigurationen
-        waere alles neu zu rechnen unnoetig teuer.
+        names ist nur noch eine Angabe, was sich geaendert hat - gerechnet
+        wird in jedem Fall alles. Vorher habe ich nach dem Namen im
+        Funktionstext gefiltert, und das ging oft daneben: ein Parameter
+        kann ueber den Block der globalen Variablen oder ueber eine
+        andere Funktion einfliessen, ohne im Text zu stehen. Dann blieb
+        das Signal stehen, und ob es klappte, haing davon ab, ob
+        zwischendurch der Functions manager etwas uebernommen hatte -
+        der rechnet naemlich immer alles neu.
+
+        Virtuelle Signale sind einzeln gezaehlt wenige; der Aufwand
+        fiele erst bei Dutzenden auf.
         """
-        namen = set(names or ())
         anzahl = 0
 
         for mdi in self.all_sub_windows():
@@ -3500,11 +3517,6 @@ class WithMDIArea:
                 continue
 
             for item in self.computed_items(wid):
-                if namen:
-                    funktion = item.signal.computation.get("function", "")
-                    if not used_in(self.functions.get(funktion, ""), namen):
-                        continue
-
                 self.edit_channel(wid.channel_item_to_config(item), item, wid)
                 anzahl += 1
 
@@ -3611,7 +3623,47 @@ class WithMDIArea:
         widget.cursor_moved()
         widget.range_modified()
 
-        widget.plot.update()
+        # Der Kanal haengt nicht zwangslaeufig im aktiven Strip: nach
+        # dem Laden einer Konfiguration ist das meist ein anderer.
+        # widget.plot ist aber der aktive - vorher wurde also der
+        # falsche Strip neu gezeichnet, und die Kurve blieb stehen,
+        # obwohl sie neu gerechnet war.
+        strip = widget.plot
+        if hasattr(widget, "strip_signal_by_uuid"):
+            try:
+                strip = widget.strip_signal_by_uuid(uuid)[0] or widget.plot
+            except Exception:
+                strip = widget.plot
+
+        # Die gezeichnete Kurve liegt gepuffert im Signal. Ohne
+        # Neuaufbau zeigt sie weiter die alten Werte - die Punkte
+        # sind neu, das Bild ist alt.
+        if item.signal.trim_info is not None:
+            item.signal.trim(*item.signal.trim_info, force=True)
+        else:
+            item.signal.path = None
+
+        # Liegt die neue Kurve ganz ausserhalb des gezeigten
+        # Wertebereichs, waere sie unsichtbar - nach einer geaenderten
+        # Kennlinie ist das der Normalfall. Dann den Bereich dieses
+        # Signals nachziehen; liegt die Kurve noch drin, bleibt die
+        # gewaehlte Skalierung. Eine gesperrte Achse bleibt
+        # unberuehrt, darum entscheidet das Signal selbst.
+        bereich = getattr(item.signal, "y_range", None)
+        try:
+            unten = float(item.signal.min)
+            oben = float(item.signal.max)
+        except (TypeError, ValueError):
+            unten = oben = None
+
+        if bereich and unten is not None and (oben < bereich[0] or unten > bereich[1]):
+            rand = (oben - unten) * 0.05 or max(abs(oben), 1.0) * 0.05
+            strip.set_y_range(uuid, (unten - rand, oben + rand))
+
+        strip.update()
+
+        if strip is not widget.plot:
+            widget.plot.update()
 
         for _channel in widget.plot.signals:
             if _channel.uuid == uuid:
@@ -4962,7 +5014,12 @@ class WithMDIArea:
 
         for new_info, old_info in changed_functions:
             translation[old_info["name"]] = new_info["name"]
-            del self.functions[old_info["name"]]
+
+            # pop statt del: fehlt der alte Name - etwa weil die
+            # Funktion zwischendurch anders hiess -, brach hier
+            # vorher alles ab, und kein virtuelles Signal wurde mehr
+            # neu gerechnet.
+            self.functions.pop(old_info["name"], None)
             self.functions[new_info["name"]] = new_info["definition"]
             changed.add(old_info["name"])
 
@@ -4973,7 +5030,7 @@ class WithMDIArea:
         deleted_functions = [info for uuid, info in original_definitions.items() if uuid not in modified_definitions]
 
         for info in deleted_functions:
-            del self.functions[info["name"]]
+            self.functions.pop(info["name"], None)
             deleted.add(info["name"])
 
         # apply changes

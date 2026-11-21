@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 from natsort import natsorted
@@ -9,12 +10,24 @@ from ..dialogs.error_dialog import ErrorDialog
 from ..dialogs.messagebox import MessageBox
 from ..ui.functions_manager import Ui_FunctionsManager
 from ..utils import (
+    FUNCTION_MIME,
     check_generated_function,
     generate_python_function,
     generate_python_function_globals,
     generate_python_variables,
 )
 from .python_highlighter import PythonHighlighter
+
+
+# Name der ersten Funktion in einem Codeblock.
+DEF_RE = re.compile(r"^\s*def\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE)
+
+
+def name_aus_code(text):
+    """Wie heisst die Funktion, die dieser Code anlegt?"""
+    treffer = DEF_RE.search(text or "")
+
+    return treffer.group(1) if treffer else ""
 
 
 class FunctionsManager(Ui_FunctionsManager, QtWidgets.QWidget):
@@ -39,6 +52,13 @@ class FunctionsManager(Ui_FunctionsManager, QtWidgets.QWidget):
         # sie scheitert jede Funktion, die KF benutzt, an "name
         # not defined" - obwohl sie beim Rechnen laeuft.
         self.extra_globals = extra_globals or ""
+
+        # Funktionen lassen sich auf einen Strip ziehen. Ueber einen
+        # Ereignisfilter, weil die Liste aus der erzeugten
+        # Oberflaeche kommt und nicht abgeleitet werden kann.
+        self._drag_start = None
+        self._drag_item = None
+        self.functions_list.viewport().installEventFilter(self)
 
         self.channels = channels or {}
 
@@ -171,9 +191,62 @@ def MyAverage(main_clock=0, p_FL=0, p_FR=0, p_RL=0, p_RR=0, vehicle_speed=0, t=0
 
         self.refresh_functions_list(selected_definition=name)
 
+    def eventFilter(self, obj, event):
+        """Ziehen aus der Funktionsliste mitlesen."""
+        if obj is self.functions_list.viewport():
+            art = event.type()
+
+            if art == QtCore.QEvent.Type.MouseButtonPress:
+                self._drag_start = event.position().toPoint()
+                self._drag_item = self.functions_list.itemAt(self._drag_start)
+
+            elif art == QtCore.QEvent.Type.MouseMove and self._drag_start is not None:
+                weg = (event.position().toPoint() - self._drag_start).manhattanLength()
+                if weg >= QtWidgets.QApplication.startDragDistance():
+                    item, self._drag_item = self._drag_item, None
+                    self._drag_start = None
+                    self.start_function_drag(item)
+
+            elif art == QtCore.QEvent.Type.MouseButtonRelease:
+                self._drag_start = None
+                self._drag_item = None
+
+        return super().eventFilter(obj, event)
+
+    def start_function_drag(self, item):
+        """Eine Funktion zum Ziehen aufnehmen."""
+        if item is None:
+            return
+
+        name = item.text()
+
+        daten = QtCore.QMimeData()
+        daten.setData(FUNCTION_MIME, name.encode("utf-8"))
+        daten.setText(name)
+
+        zug = QtGui.QDrag(self.functions_list)
+        zug.setMimeData(daten)
+        zug.exec(QtCore.Qt.DropAction.CopyAction)
+
+    def extra_globals_text(self):
+        """Der Zusatz-Code, bei jeder Pruefung frisch geholt.
+
+        Als Funktion uebergeben, weil das Parameterfenster daneben
+        offen stehen und die Parameter jederzeit aendern kann.
+        """
+        wert = self.extra_globals
+
+        if callable(wert):
+            try:
+                wert = wert()
+            except Exception:
+                wert = ""
+
+        return wert or ""
+
     def check_globals_syntax(self, silent=False):
         _globals = generate_python_function_globals()
-        generate_python_variables(self.extra_globals, in_globals=_globals)
+        generate_python_variables(self.extra_globals_text(), in_globals=_globals)
 
         trace = generate_python_variables(self.globals_definition.toPlainText(), in_globals=_globals)
 
@@ -204,7 +277,7 @@ def MyAverage(main_clock=0, p_FL=0, p_FR=0, p_RL=0, p_RR=0, vehicle_speed=0, t=0
         _globals = generate_python_function_globals()
 
         # erst die Parameter, dann der eigene Block - so wie beim Rechnen
-        generate_python_variables(self.extra_globals, in_globals=_globals)
+        generate_python_variables(self.extra_globals_text(), in_globals=_globals)
         generate_python_variables(globals_definition, in_globals=_globals)
 
         for info in self.definitions.values():
@@ -421,9 +494,19 @@ def MyAverage(main_clock=0, p_FL=0, p_FR=0, p_RL=0, p_RR=0, vehicle_speed=0, t=0
         info["definition"] = info["current_definition"] = self.function_definition.toPlainText().replace("\t", "    ")
 
         ok, func = self.check_syntax(silent=True)
-        if ok:
-            func_name = func.__name__
 
+        # Der Name kommt aus dem Code, nicht aus der Probe. Laeuft die
+        # Funktion gerade nicht - etwa weil ein Parameter noch fehlt
+        # oder ein Kanal nicht passt -, wurde eine Umbenennung vorher
+        # stillschweigend verworfen: in der Liste stand weiter der
+        # alte Name, im Code der neue. Ein Kanal, der auf den alten
+        # Namen zeigte, rechnete danach nichts mehr.
+        if ok and func is not None:
+            func_name = func.__name__
+        else:
+            func_name = name_aus_code(info["current_definition"])
+
+        if func_name:
             if current_name != func_name and func_name in self.definitions:
                 MessageBox.information(
                     self,

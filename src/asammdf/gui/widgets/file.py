@@ -47,6 +47,7 @@ from ..serde import (
 )
 from ..ui.file_widget import Ui_file_widget
 from ..utils import (
+    wildcard_pattern,
     COMPRESSION_OPTIONS,
     GREEN,
     HelperChannel,
@@ -79,28 +80,6 @@ def _process_dict(d):
         new_d[k] = v
 
     return new_d
-
-
-def wildcard_pattern(text):
-    """Suchtext mit * und ? als Platzhalter in ein Suchmuster umsetzen.
-
-    So wie im Explorer, in INCA oder MDA: * steht fuer beliebig viele
-    Zeichen, ? fuer genau eines, alles andere gilt woertlich. Vorher
-    ging der Text unveraendert als regulaerer Ausdruck durch - "EngTq*Sp"
-    bedeutete dort "EngT, dann beliebig viele q, dann Sp" und fand
-    EngTqIndcdSp gerade nicht.
-    """
-    teile = []
-
-    for zeichen in text:
-        if zeichen == "*":
-            teile.append(".*")
-        elif zeichen == "?":
-            teile.append(".")
-        else:
-            teile.append(re.escape(zeichen))
-
-    return "".join(teile)
 
 
 FRIENDLY_ATRRIBUTES = {
@@ -345,10 +324,23 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             # Mehrere Seiten fuer dieselbe Messdatei, jede mit eigenen
             # Fenstern. self.mdi_area zeigt immer auf die sichtbare Seite.
             self.page_tabs = QtWidgets.QTabWidget()
+
+            # Die Fensterbereiche der Seiten muessen auf der
+            # Python-Seite festgehalten werden. Gibt man sie nur an
+            # den Reiter weiter, haelt sie allein C++ - PySide raeumt
+            # dann die Python-Seite weg und baut sie beim naechsten
+            # Zugriff neu auf. Die Verbindungen von addSubWindow
+            # (resized, moved) zeigen danach ins Leere, und jedes
+            # Verschieben eines Fensters endet in
+            # "Slot 'MdiAreaWidget::' not found".
+            self._page_areas = []
+
             self.page_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.South)
             self.page_tabs.setDocumentMode(True)
             self.page_tabs.setMovable(True)
             self.page_tabs.tabBarDoubleClicked.connect(self.rename_page)
+
+            self.page_tabs.currentChanged.connect(self.page_shown)
 
             bar = self.page_tabs.tabBar()
             bar.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1190,7 +1182,17 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
     # ------------------------------------------------------------------
     @property
     def mdi_area(self):
-        """Fensterbereich der gerade sichtbaren Seite."""
+        """Fensterbereich der gerade sichtbaren Seite.
+
+        Beim Laden einer Konfiguration zeigt er auf die Seite, die
+        gerade gefuellt wird - sonst muesste der Reiter dafuer
+        umgeschaltet werden, und man saehe jede Seite einmal
+        aufblitzen.
+        """
+        ziel = getattr(self, "_load_area", None)
+        if ziel is not None:
+            return ziel
+
         tabs = getattr(self, "page_tabs", None)
 
         return tabs.currentWidget() if tabs is not None else None
@@ -1201,7 +1203,14 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         if tabs is None:
             return []
 
-        return [tabs.widget(index) for index in range(tabs.count())]
+        areas = [tabs.widget(index) for index in range(tabs.count())]
+
+        # Referenzen auf den jetzigen Stand nachziehen: geschlossene
+        # Seiten fallen heraus, neue kommen dazu. Siehe die
+        # Begruendung bei _page_areas.
+        self._page_areas = areas
+
+        return areas
 
     def close_all_windows(self):
         """Fenster aller Seiten abraeumen, etwa vor dem Neuladen der Messdatei.
@@ -1220,8 +1229,35 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                 widget.deleteLater()
                 window.close()
 
-    def new_page(self, name=""):
-        """Eine weitere Seite anlegen und gleich zeigen."""
+    def page_shown(self, index):
+        """Fenster einer Seite ausrichten, wenn sie sichtbar wird.
+
+        Fenster, die auf einer verdeckten Seite entstanden sind,
+        kennen ihre endgueltige Groesse noch nicht. Beim Zeigen
+        stimmen die Masse, also richten sich Kanallisten und
+        Zeichenflaechen jetzt aneinander aus.
+        """
+        tabs = getattr(self, "page_tabs", None)
+        if tabs is None:
+            return
+
+        area = tabs.widget(index)
+        if area is None:
+            return
+
+        for window in area.subWindowList():
+            widget = window.widget()
+            richten = getattr(widget, "reapply_layout", None)
+            if richten is not None:
+                richten()
+
+    def new_page(self, name="", show=True):
+        """Eine weitere Seite anlegen.
+
+        show=False beim Herstellen einer Konfiguration: dort
+        entstehen alle Seiten auf einmal, und jeder Wechsel waere
+        nur ein Aufblitzen.
+        """
         area = MdiAreaWidget()
 
         area.add_window_request.connect(self.add_window)
@@ -1238,7 +1274,14 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             area.installEventFilter(background)
 
         index = self.page_tabs.addTab(area, name or f"Page {self.page_tabs.count() + 1}")
-        self.page_tabs.setCurrentIndex(index)
+
+        # festhalten, bevor der Reiter die einzige Referenz ist
+        if not hasattr(self, "_page_areas"):
+            self._page_areas = []
+        self._page_areas.append(area)
+
+        if show:
+            self.page_tabs.setCurrentIndex(index)
 
         return area
 
@@ -1253,7 +1296,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             area.deleteLater()
 
         while self.page_tabs.count() < len(names):
-            self.new_page()
+            self.new_page(show=False)
 
         for index, name in enumerate(names):
             self.page_tabs.setTabText(index, name)
@@ -1841,11 +1884,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     progress.setLabelText(f"Loading {window_type} window <{window_title}>")
                     QtWidgets.QApplication.processEvents()
 
-                # Das Fenster entsteht immer auf der sichtbaren Seite,
-                # also vorher auf die richtige umschalten.
+                # Das Fenster entsteht auf seiner Seite, ohne dass der
+                # Reiter dorthin wechselt: self.mdi_area zeigt
+                # waehrend des Ladens auf diese Seite.
                 page = int(window.get("tab", 0) or 0)
-                if 0 <= page < self.page_tabs.count():
-                    self.page_tabs.setCurrentIndex(page)
+                seiten = self.mdi_areas()
+                if 0 <= page < len(seiten):
+                    self._load_area = seiten[page]
 
                 try:
                     self.load_window(window)
@@ -1857,6 +1902,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
             if progress:
                 progress.cancel()
+
+            # Ab jetzt gilt wieder die sichtbare Seite.
+            self._load_area = None
 
             active_tab = int(info.get("active_tab", 0) or 0)
             if 0 <= active_tab < self.page_tabs.count():
