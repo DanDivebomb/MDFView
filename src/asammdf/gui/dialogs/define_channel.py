@@ -147,7 +147,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         self.func_name_label.setMinimumSize(QtCore.QSize(self.triggering_on_all.width() - 1, 0))
 
         # Nicht mehr bildschirmfuellend: die Groesse vom letzten Mal.
-        remember_geometry(self, "define_channel", (1000, 600))
+        remember_geometry(self, "define_channel_kompakt", (900, 470))
 
     def apply(self):
         if not self.functions.currentIndex() >= 0:
@@ -254,6 +254,14 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         self.signature = inspect.signature(func)
 
         parameters = list(self.signature.parameters)[:-1]
+
+        # Hoehe eines gewoehnlichen Eingabefeldes - dasselbe Mass wie
+        # "on channel" und "time interval" oben im Dialog.
+        feldhoehe = max(
+            self.trigger_channel.sizeHint().height(),
+            QtWidgets.QLineEdit().sizeHint().height(),
+        )
+
         for i, arg_name in enumerate(parameters):
             row = i * 3 + 2  # function name and arguments label raws
 
@@ -261,14 +269,16 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             self.arg_layout.addWidget(label, row, 0)
             text_edit = QtWidgets.QPlainTextEdit()
 
-            # Drei Zeilen reichen: meist steht hier ein einziger
+            # Eine Zeile reicht: hier steht fast immer ein einziger
             # Kanalname. Mehrere Zeilen sind Ersatznamen, die man
-            # selten braucht - dafuer laesst sich rollen. Vorher
-            # war jedes Feld so hoch, dass der Dialog kaum auf den
+            # selten braucht - dafuer laesst sich rollen. Vorher war
+            # jedes Feld so hoch, dass der Dialog kaum auf den
             # Bildschirm passte.
-            zeilenhoehe = QtGui.QFontMetricsF(text_edit.font()).lineSpacing()
-            text_edit.setMaximumHeight(int(zeilenhoehe * 3) + 12)
+            text_edit.setFixedHeight(feldhoehe)
+            text_edit.document().setDocumentMargin(2)
+            text_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
             text_edit.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            text_edit.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
             self.arg_layout.addWidget(text_edit, row, 1)
             button = QtWidgets.QPushButton("")
@@ -291,7 +301,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             20, 20, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Expanding
         )
 
-        self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
+        self.arg_layout.addItem(spacer, self.arg_layout.rowCount(), 0)
         self.arg_widgets.append(spacer)
 
         self.preselect_mode(name)

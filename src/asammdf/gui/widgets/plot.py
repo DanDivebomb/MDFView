@@ -1963,7 +1963,7 @@ class Plot(QtWidgets.QWidget):
 
         self.delta_btn = btn = QtWidgets.QPushButton("")
         btn.setObjectName("delta_btn")
-        self.delta_btn.clicked.connect(self.toggle_region_values_display_mode)
+        self.delta_btn.clicked.connect(lambda *_: self.toggle_region_values_display_mode(propagate=True))
         icon = QtGui.QIcon()
         icon.addPixmap(QtGui.QPixmap(":/delta_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
@@ -4174,7 +4174,7 @@ class Plot(QtWidgets.QWidget):
         elif name == "focused":
             self.toggle_focused_mode()
         elif name == "delta":
-            self.toggle_region_values_display_mode()
+            self.toggle_region_values_display_mode(propagate=True)
         elif name == "bookmarks":
             self.toggle_bookmarks()
 
@@ -4211,7 +4211,7 @@ class Plot(QtWidgets.QWidget):
             self._settings.setValue("plot/focused_mode", checked)
         elif name == "delta":
             mode = "delta" if checked else "value"
-            self.toggle_region_values_display_mode(mode=mode)
+            self.toggle_region_values_display_mode(mode=mode, propagate=True)
             self._settings.setValue("plot/region_values_display_mode", mode)
         elif name == "bookmarks":
             self.toggle_bookmarks(hide=not checked)
@@ -6177,7 +6177,20 @@ class Plot(QtWidgets.QWidget):
         self.focused_mode_btn.setIcon(icon)
         self._sync_strip_buttons()
 
-    def toggle_region_values_display_mode(self, event=None, mode=None):
+    @staticmethod
+    def alle_plotfenster():
+        """Alle offenen Plotfenster.
+
+        Bewusst ohne Merkliste: eine solche Liste haelt Fenster fest,
+        die es laengst nicht mehr gibt.
+        """
+        fenster = []
+        for widget in QtWidgets.QApplication.allWidgets():
+            if isinstance(widget, Plot):
+                fenster.append(widget)
+        return fenster
+
+    def toggle_region_values_display_mode(self, event=None, mode=None, propagate=False):
         if mode is None:
             self.region_values_display_mode = "delta" if self.region_values_display_mode == "value" else "value"
         else:
@@ -6212,6 +6225,13 @@ class Plot(QtWidgets.QWidget):
 
         for item in self.iter_channel_items():
             item.set_value(update=True, force=True)
+
+        # Der Knopf gilt fuer alle Plotfenster - sonst steht in einem
+        # Fenster Δ und im naechsten der Wert am Cursor.
+        if propagate:
+            for anderes in Plot.alle_plotfenster():
+                if anderes is not self and anderes.region_values_display_mode != self.region_values_display_mode:
+                    anderes.toggle_region_values_display_mode(mode=self.region_values_display_mode)
 
     def iter_channel_items(self):
         """Alle Kanaleintraege aller Strips durchlaufen."""
@@ -9561,6 +9581,7 @@ class CursorInfo(QtWidgets.QLabel):
         self.name = name
         self.unit = unit
         self.plot = plot
+        self._zeilen = 1
 
         self.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.setAlignment(
@@ -9615,8 +9636,10 @@ class CursorInfo(QtWidgets.QLabel):
 
                 if cursor_info_text:
                     self.setText(cursor_info_text)
+                self.zeilen_melden(1)
             else:
                 self.setText("")
+                self.zeilen_melden(1)
 
         else:
             start, stop = self.plot.region.getRegion()
@@ -9643,12 +9666,39 @@ class CursorInfo(QtWidgets.QLabel):
 
                 delta_info = f"{timedelta(seconds=(stop - start))}"
 
+            # Zwei Zeilen in einem Absatz: der Absatzabstand von zwei
+            # <p> kostet hier Hoehe, die unten niemand hat.
             self.setText(
                 "<html><head/><body>"
-                f"<p>{self.name}1 = {start_info}, {self.name}2 = {stop_info}</p>"
-                f"<p>Δ{self.name} = {delta_info}</p> "
+                f"<p>{self.name}1 = {start_info}, {self.name}2 = {stop_info}<br/>"
+                f"Δ{self.name} = {delta_info}</p>"
                 "</body></html>"
             )
+            self.zeilen_melden(2)
+
+    def zeilen_melden(self, zeilen):
+        """Hoehe nachfuehren, wenn die Anzeige ein- oder zweizeilig wird.
+
+        align_columns legt die Hoehe dieses Feldes fest, damit es auf
+        einer Linie mit der Zeitachse liegt. Mit Bereich braucht es eine
+        Zeile mehr (Δt); ohne diesen Anstoss bliebe sie abgeschnitten.
+        """
+        if zeilen == getattr(self, "_zeilen", 1):
+            return
+
+        self._zeilen = zeilen
+
+        besitzer = getattr(self.plot, "plot_parent", None)
+        if besitzer is None or not hasattr(besitzer, "align_columns"):
+            return
+
+        # Die feste Hoehe von vorhin begrenzt auch sizeHint(). Erst
+        # loesen, sonst misst align_columns die alte Hoehe und die
+        # Anzeige kann weder wachsen noch wieder schrumpfen.
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+
+        QtCore.QTimer.singleShot(0, besitzer.align_columns)
 
     def set_precision(self, precision):
         self.precision = precision

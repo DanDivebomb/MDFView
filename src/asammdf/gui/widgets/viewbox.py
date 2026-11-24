@@ -134,19 +134,16 @@ class ViewBoxMenu(QtWidgets.QMenu):
         self.updateState()
 
     def updateState(self):
-        state = self.view().getState(copy=False)
-        if state["mouseMode"] == ViewBoxWithCursor.PanMode:
-            self.mouseModes[0].setChecked(True)
-        elif state["mouseMode"] == ViewBoxWithCursor.CursorMode:
-            self.mouseModes[1].setChecked(True)
+        # Der Mausmodus gehoert der Klasse und nicht der einzelnen
+        # Viewbox - der Haken zeigt deshalb den Modus aller Fenster.
+        self.mouseModes[1 if ViewBoxWithCursor.mouse_mode == "cursor" else 0].setChecked(True)
 
         self.zoom_axes[1 if ViewBoxWithCursor.zoom_axis == "y" else 0].setChecked(True)
 
         self.valid = True
 
     def popup(self, *args):
-        if not self.valid:
-            self.updateState()
+        self.updateState()
 
         window, _strip = self.strip_window()
         self.strip_menu.menuAction().setVisible(window is not None)
@@ -183,8 +180,13 @@ class ViewBoxMenu(QtWidgets.QMenu):
             window.remove_strip(strip)
 
     def set_mouse_mode(self, mode):
-        self._settings.setValue("plot/mouse_mode", mode)
-        self.view().setLeftButtonAction(mode)
+        # Gilt fuer alle Strips und alle Fenster, nicht nur fuer den, in
+        # den geklickt wurde - so wie die Zoomachse.
+        ViewBoxWithCursor.set_mouse_mode(mode)
+
+        view = self.view()
+        if view is not None:
+            view.setLeftButtonAction(mode)
 
     def set_zoom_axis(self, axis):
         ViewBoxWithCursor.set_zoom_axis(axis)
@@ -202,6 +204,10 @@ class ViewBoxWithCursor(pg.ViewBox):
     # Fenster - umgeschaltet gilt sie sofort in allen Strips und Plots,
     # so wie die Zoommodi in vSignalyzer.
     zoom_axis = "x"
+
+    # Mausmodus: "pan" oder "cursor". Gehoert wie die Zoomachse der
+    # Klasse - umgeschaltet gilt er sofort in allen Strips und Fenstern.
+    mouse_mode = "pan"
 
     PanMode = 3
     CursorMode = 2
@@ -254,14 +260,24 @@ class ViewBoxWithCursor(pg.ViewBox):
         self._settings = QtCore.QSettings()
 
         # gemerkten Mausmodus uebernehmen
-        mode = self._settings.value("plot/mouse_mode", "pan", str)
-        if mode in ("pan", "cursor", "rect"):
-            self.setLeftButtonAction(mode)
+        mode = self._settings.value("plot/mouse_mode", ViewBoxWithCursor.mouse_mode, str)
+        if mode in ("pan", "cursor"):
+            ViewBoxWithCursor.mouse_mode = mode
+        self.setLeftButtonAction(ViewBoxWithCursor.mouse_mode)
 
         # gemerkte Zoomachse uebernehmen
         axis = self._settings.value("plot/zoom_axis", ViewBoxWithCursor.zoom_axis, str)
         if axis in ("x", "y"):
             ViewBoxWithCursor.zoom_axis = axis
+
+    @classmethod
+    def set_mouse_mode(cls, mode):
+        """Mausmodus umschalten - wirkt sofort in allen Fenstern."""
+        if mode not in ("pan", "cursor"):
+            return
+
+        cls.mouse_mode = mode
+        QtCore.QSettings().setValue("plot/mouse_mode", mode)
 
     @classmethod
     def set_zoom_axis(cls, axis):
@@ -328,7 +344,7 @@ class ViewBoxWithCursor(pg.ViewBox):
         if axis is not None:
             mask[1 - axis] = 0.0
 
-        if self.state["mouseMode"] == ViewBoxWithCursor.CursorMode and not ignore_cursor:
+        if ViewBoxWithCursor.mouse_mode == "cursor" and not ignore_cursor:
             if ev.button() == QtCore.Qt.MouseButton.LeftButton:
                 self.sigCursorMoved.emit(ev)
                 if self.zoom_start is not None:
@@ -402,7 +418,7 @@ class ViewBoxWithCursor(pg.ViewBox):
         ev.ignore()
 
     def mousePressEvent(self, ev):
-        if self.state["mouseMode"] == ViewBoxWithCursor.CursorMode and self.zoom in (
+        if ViewBoxWithCursor.mouse_mode == "cursor" and self.zoom in (
             self.X_zoom,
             self.Y_zoom,
             *self.XY_zoom,
